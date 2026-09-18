@@ -1,0 +1,37 @@
+{
+  "name": "jevbrowser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Search eBay with Playwright, judge listings with JEV, produce a report.",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p web",
+    "spike:jev": "node --env-file=.env --import tsx scripts/spike-jev.ts",
+    "dev:server": "node --env-file=.env --import tsx scripts/start-server.ts",
+    "dev:web": "vite --config web/vite.config.ts",
+    "dev": "npm run dev:server & npm run dev:web"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^26.6.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0",
+    "vitest": "^5.0.1"
+  },
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0",
+    "better-sqlite3": "^13.0.3",
+    "fastify": "^5.12.5",
+    "playwright": "^1.63.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  }
+}

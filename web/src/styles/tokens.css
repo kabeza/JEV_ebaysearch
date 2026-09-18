@@ -1,0 +1,18 @@
+@import 'tailwindcss';
+
+/*
+ * The project palette, defined exactly once. Referenced as Tailwind colour
+ * utilities (bg-space-indigo, text-seashell, ...) so no component ever holds a
+ * hex literal. Names from the design spec, section 10.1.
+ */
+@theme {
+  --color-space-indigo: #22223b; /* dark base — quiet strength, nighttime sky */
+  --color-dusty-grape: #4a4e69; /* surfaces, secondary structure */
+  --color-lilac-ash: #9a8c98; /* muted text, borders, inactive states */
+  --color-almond-silk: #c9ada7; /* warm accent, highlights */
+  --color-seashell: #f2e9e4; /* light backdrop, primary text on dark */
+}
+
+body {
+  @apply bg-space-indigo text-seashell antialiased;
+}

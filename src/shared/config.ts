@@ -1,0 +1,60 @@
+export const PROJECT_NAME = 'jevbrowser'
+
+/** Run settings, defaulted to the values agreed in the design spec (section 5.1). */
+export interface RunSettings {
+  /** Stop after this many result pages. */
+  maxPages: number
+  /** Stop after this many minutes, whichever comes first. */
+  maxMinutes: number
+  /** How many listings to send to JEV in one request. */
+  batchSize: number
+  /** Visible browser by default: a broken selector is visible, not silent. */
+  headed: boolean
+  /** US ZIP used to get domestic shipping costs. */
+  zhomeZip: string
+  /** Randomized pacing between page loads, in milliseconds. */
+  pacingMinMs: number
+  pacingMaxMs: number
+}
+
+export const DEFAULTS: RunSettings = {
+  maxPages: 25,
+  maxMinutes: 10,
+  batchSize: 10,
+  headed: true,
+  zhomeZip: '10001',
+  pacingMinMs: 1500,
+  pacingMaxMs: 3000,
+}
+
+/** Default model alias; resolves to jev-1.13.0. */
+export const MODEL_ALIAS = 'jev-latest'
+
+/**
+ * TypeSafe pricing, USD per million tokens. Verified 2026-09-18 at
+ * https://docs.typesafe.ai/models.md ($42 per Btok). Output tokens are free.
+ * Re-check before trusting the cost estimate shown in the UI.
+ */
+export const PRICING = {
+  inputPerMillionUsd: 0.042,
+  outputPerMillionUsd: 0,
+}
+
+export function estimateCostUsd(usage: { input_tokens: number; output_tokens: number }): number {
+  return (
+    (usage.input_tokens / 1_000_000) * PRICING.inputPerMillionUsd +
+    (usage.output_tokens / 1_000_000) * PRICING.outputPerMillionUsd
+  )
+}
+
+/**
+ * Service limits, from the same page. `stateTokens` is what actually bounds
+ * batch size: the state must fit in 32k of the 64k context, alongside the
+ * longest question.
+ */
+export const LIMITS = {
+  contextTokens: 64_000,
+  stateTokens: 32_000,
+  requestsPerMinute: 1_200,
+  tokensPerSecond: 250_000,
+} as const

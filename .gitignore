@@ -1,0 +1,19 @@
+# Secrets — NEVER commit this. It holds TYPESAFE_API_KEY.
+.env
+
+# Runtime state: SQLite database, persistent browser profile, failure screenshots.
+# The browser profile in particular is large and machine-specific.
+data/
+
+node_modules/
+dist/
+.DS_Store
+*.log
+
+# Local editor/agent settings, not project configuration
+.claude/settings.local.json
+
+# Temporary reconnaissance/debug scripts written during a session
+verify-ui.mts
+diag.mts
+mkfixture.mts
