@@ -13,6 +13,8 @@ export type RunEventType =
   | 'run.progress'
   | 'page.fetched'
   | 'cards.extracted'
+  | 'cards.filtered'
+  | 'listing.visited'
   | 'judgments.received'
   | 'error'
 

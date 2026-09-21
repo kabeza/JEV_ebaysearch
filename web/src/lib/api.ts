@@ -24,12 +24,26 @@ export function createSearch(input: {
   name: string
   keyword: string
   criteriaText: string
+  spec?: Record<string, unknown>
 }): Promise<Search> {
   return request<Search>('/api/searches', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(input),
   })
+}
+
+/** What a listing page said, when it was visited. */
+export interface ListingDetail {
+  title: string | null
+  price: number | null
+  shipping: number | null
+  condition: string | null
+  sellerName: string | null
+  sellerFeedback: string | null
+  /** Every label/value pair eBay states, keyed by its own label. */
+  specifics: Record<string, string>
+  rawText: string[]
 }
 
 export interface Listing {
@@ -47,6 +61,8 @@ export interface Listing {
   sponsoredMarker: boolean
   stage: string
   rejectReason: string | null
+  /** Null when the listing was never visited, or its page failed to read. */
+  detail: ListingDetail | null
 }
 
 export interface Run {
@@ -71,8 +87,33 @@ export function cancelRun(runId: number): Promise<{ cancelled: boolean }> {
   return request<{ cancelled: boolean }>(`/api/runs/${runId}/cancel`, { method: 'POST' })
 }
 
-export function getRun(runId: number): Promise<{ run: Run; listings: Listing[] }> {
-  return request<{ run: Run; listings: Listing[] }>(`/api/runs/${runId}`)
+/**
+ * A JEV answer, however the primitive shaped it.
+ *
+ * `probabilities` and `legend` are keyed by STRING index, and for a score answer
+ * `score` is a probability-weighted value on the legend's scale — not an index
+ * into it. A five-level answer can read 2.18.
+ */
+export interface JevAnswer {
+  type: 'noul' | 'score' | string
+  noul?: number
+  score?: number
+  confidence?: number
+  legend?: Record<string, string>
+  probabilities?: Record<string, number>
+}
+
+export interface Judgment {
+  id: number
+  listingId: number
+  questionKey: string
+  answer: JevAnswer
+}
+
+export function getRun(
+  runId: number,
+): Promise<{ run: Run; listings: Listing[]; judgments: Judgment[] }> {
+  return request<{ run: Run; listings: Listing[]; judgments: Judgment[] }>(`/api/runs/${runId}`)
 }
 
 export interface RunEvent {

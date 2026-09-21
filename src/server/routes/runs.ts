@@ -3,16 +3,34 @@ import type { Database as SqliteDatabase } from 'better-sqlite3'
 import { getRun, listRuns } from '../../storage/runs'
 import { listListings } from '../../storage/listings'
 import { listEvents } from '../../storage/events'
+import { listJudgments } from '../../storage/judgments'
 import { activeRunId, cancelRun, isRunning, startRun, subscribe } from '../../pipeline/runner'
+import type { PageSource } from '../../scraper/browser'
+import type { JevClient } from '../../jev/client'
 
-export function registerRunRoutes(app: FastifyInstance, db: SqliteDatabase): void {
+export interface RunRouteOptions {
+  /** See `ServerOptions.sourceFactory`; unset in production. */
+  sourceFactory?: () => Promise<PageSource>
+  judgeClientFactory?: () => JevClient
+}
+
+export function registerRunRoutes(
+  app: FastifyInstance,
+  db: SqliteDatabase,
+  opts: RunRouteOptions = {},
+): void {
   app.post('/api/runs', async (request, reply) => {
     const body = request.body as Partial<{ searchId: number; settings: Record<string, unknown> }>
     if (typeof body?.searchId !== 'number') {
       return reply.code(400).send({ error: 'searchId is required' })
     }
     try {
-      const runId = startRun(db, { searchId: body.searchId, settings: body.settings })
+      const runId = startRun(db, {
+        searchId: body.searchId,
+        settings: body.settings,
+        sourceFactory: opts.sourceFactory,
+        judgeClientFactory: opts.judgeClientFactory,
+      })
       return reply.code(202).send({ runId })
     } catch (err) {
       return reply.code(409).send({ error: err instanceof Error ? err.message : String(err) })
@@ -25,7 +43,9 @@ export function registerRunRoutes(app: FastifyInstance, db: SqliteDatabase): voi
     const id = Number((request.params as { id: string }).id)
     const run = getRun(db, id)
     if (!run) return reply.code(404).send({ error: `No run ${id}` })
-    return { run, listings: listListings(db, id) }
+    // Judgments travel with the listings: the report joins them by listing id
+    // in the browser, and re-weighting must not cost a request (spec §5.6).
+    return { run, listings: listListings(db, id), judgments: listJudgments(db, id) }
   })
 
   app.post('/api/runs/:id/cancel', async (request, reply) => {

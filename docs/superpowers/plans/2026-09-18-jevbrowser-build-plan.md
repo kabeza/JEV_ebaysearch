@@ -1613,37 +1613,117 @@ test and produces an event, a screenshot where relevant, and no silent empty res
 
 ---
 
-## Handoff — state at end of 2026-09-18
+## Stage 3 — code pre-filter (complete 2026-09-21)
 
-**Working and verified:** Stage 0 complete, Stage 1 complete, Stage 2 approximately 85% complete.
+**Goal and acceptance, as written above, are met.** 150 tests passing, typecheck clean on both
+projects.
 
-- 75 tests passing, `tsc --noEmit` clean on both the server and web projects.
-- Live scraping verified repeatedly: 113 listings stored from a 2-page run, prices parsed 113/113
-  with zero nulls, shipping captured for all, URLs valid 113/113.
-- The `LIVE` run path is proven end to end: `tests/runner-live.test.ts` drives
-  startRun → publish → subscribe → finish with an injected page source, no eBay involved.
+**What was built**
+
+- `src/shared/parse.ts` — `parseRamGb`, `parseStorageGb`, `parseTouch`, `parseCpuVendor`. Each
+  returns null rather than a guess. Capacities snap to real values (RAM in 4…128GB, disk in
+  64GB…8TB), which is what stops `T14s Gen 6` and `21TB000EUS` being read as capacity. RAM and disk
+  are told apart by label proximity first, then by magnitude for a bare pair like `32GB 512GB`.
+  `parseTouch` checks `non-touch` before `touch`, because `Non-Touch` contains `Touch`.
+- `src/pipeline/prefilter.ts` — `prefilter(listing, requirements)` and
+  `requirementsFromSpec(spec)`. Fixed rule order (price, RAM, storage, touch, vendor), first
+  failure wins, every reason naming both sides.
+- Requirements come from structured form fields on the search (`max_price`, `ram_gb`,
+  `storage_gb`, `touch`, `cpu_family`), not from the criteria prose. `spec_json` was `{}` for every
+  saved search before this, so there was nothing to filter on.
+- `cards.filtered` event, `rejected` run stat, and a collapsed **Filtered out (N)** table in
+  `RunView.tsx` showing each rejected listing with its reason. Rejected rows are stored with
+  `stage: 'rejected'` so the reason survives a refresh.
+- `tests/server-events-stream.test.ts` — new guard for live SSE push at the HTTP layer.
+
+**The governing rule: only a contradiction rejects.** A missing price, an unreadable spec or an
+ambiguous title survives to JEV. A rejected listing is never seen again, so a wrong reject cannot be
+recovered downstream — the cost of this filter is JEV calls, and the cost of being wrong is silent.
+
+**Bug found and fixed while wiring the price rule.** `parseShipping` read the first number in the
+`join`ed attribute rows. The first row of every card is the item's own price, so every
+paid-shipping card stored its price as its shipping cost — 59 of 60 fixture cards, 11 of 60 in a
+live run. Free-shipping cards escaped because that branch returns 0 first. Now parsed row by row,
+with a fixture-level guard. Run 7's stored shipping is wrong; nothing re-reads it yet.
+
+**Deviations worth knowing:** the two pure parsers were written test-first; `web/src/lib/spec.ts`
+was written then tested, and its first version used `toLocaleString`, which does not group on this
+machine — both sides now group by hand.
+
+## Stage 4 — listing detail extraction (complete 2026-09-21)
+
+**What was built**
+
+- `src/scraper/listing.ts` — `extractDetail(page)`, `parseDetail(fields)`,
+  `parseShippingValue`, `extractSpecifics`. Same split as `cards.ts`: DOM reading produces plain
+  `DetailFields`, and `parseDetail` maps them with no browser involved.
+- `PageSource` gained `readListing()`. The pipeline visits survivors after the results-page loop,
+  in card order (eBay's relevance order), capped by `maxDetailVisits` (new `DEFAULTS` value, 20).
+- `listing.visited` event, `detailsFetched` / `detailsFailed` stats, stored in `raw_detail_json`
+  and exposed as `StoredListing.detail`. Card fields are never overwritten.
+- `RunView.tsx` rows expand into a `ListingDetailPanel` showing the specifics as label/value
+  pairs, plus condition and seller from the page.
+
+**Failure policy, which is the delicate part.** One listing whose page will not read is marked
+`detail_failed`, gets an `error` event, and still reaches JEV on its card data. Three in a row is
+not bad luck — that is a markup change, so the run fails loudly with a screenshot.
+
+**Recon findings (2026-09-21), established by probing a real listing page.** Item specifics is a
+`<dl>` of alternating `dt.ux-labels-values__labels` / `dd.ux-labels-values__values`; title is
+`h1.x-item-title__mainTitle`; price `.x-price-primary`; condition `.x-item-condition-text`; seller
+`.x-sellercard-atf`; shipping is the label/value pair labelled `Shipping`, whose value reads
+"Free FedEx Ground…" or a price. Two traps: `N\A` is eBay's literal placeholder for an unknown
+field, and the `Condition` row is a paragraph of boilerplate. Both are dropped rather than stored.
+
+**Deviations and things fixed mid-stage**
+
+- Playwright's default 30s wait per locator meant six missing fields would stall a run for three
+  minutes; every read is now bounded at 1s.
+- `RunView` did not listen for `listing.visited` and `run.finished` refreshed only the run, not the
+  listings — so the specifics stayed invisible until a reload. The browser repro caught it. The
+  table now re-reads both from the server on any event that changes either.
+- `runner-live` and `server-events-stream` tests run with `maxDetailVisits: 0`: they cover live
+  delivery, and a real detail visit paces for seconds per listing.
+
+**Fixtures and tools**
+
+- `tests/fixtures/ebay/listing-t14s.html` — 16.8 KB, the real nodes the parser reads.
+- `scripts/recon-listing.ts` — probe one listing page; `scripts/build-listing-fixture.ts` —
+  rebuild the fixture from a fresh capture when eBay changes its layout.
+
+## Handoff — state at end of 2026-09-21
+
+**Working and verified:** Stages 0–4 complete.
+
+- 173 tests passing, `tsc --noEmit` clean on both the server and web projects.
+- Live scraping verified repeatedly; three runs on 2026-09-21 (60 listings each).
+- The live-table bug reported on 2026-09-18 **does not reproduce** — see `CLAUDE.md` rule 13 for the
+  likeliest cause and `tests/server-events-stream.test.ts` for the new guard.
+- A browser-level repro that needs no eBay: `node --import tsx scripts/repro-live-ui.ts` (start
+  `npm run dev:web` first). It drives the real UI with a real Playwright page over the captured
+  fixtures, prints which `EventSource` listeners fired, and shows a survivor's detail panel. It has
+  already caught one real defect that no unit test could.
 
 **Unfinished — pick up here next session:**
 
-1. **The live results table in the UI does not update during a run.** It stays on
-   "running / 0 rows" while the run completes underneath. Confirmed NOT a server problem: the raw
-   `EventSource` in the same browser page receives every event correctly, and `curl` against both
-   the API and the Vite proxy shows the full correct stream. **The break is in the React layer of
-   `web/src/components/RunView.tsx`.** One genuine bug on this path was already found and fixed
-   (the pipeline wrote events to SQLite without publishing them); this is a second, separate cause.
-   Debug it by adding temporary `console.log` inside the event handlers and confirming which ones
-   actually fire — do not re-theorise, instrument.
-
-2. **The sponsored marker is a known defect.** `.s-card__sep b` is present on every card, so it
-   carries no signal — a live run flagged 113 of 113. The field is retained as a raw observation
+1. **The sponsored marker is still a known defect.** `.s-card__sep b` is present on every card, so
+   it carries no signal — a live run flagged 113 of 113. The field is retained as a raw observation
    but is deliberately not displayed. Find the real discriminator before surfacing it.
 
-3. **eBay rate-limits by volume.** After roughly 50 page loads in a day, a run returned HTTP 403
-   with the standard error page. It recovered on its own. Error handling behaved correctly
-   (explicit failure, screenshot, no silent empty result). Keep runs modest and expect this.
+2. **Stage 5 (JEV judgments) is next.** Everything it needs is now stored: `stage: 'survivor'`
+   selects the listings, and `detail.specifics` carries the item specifics to reason over. The
+   six questions are sketched in spec §5.5 and the questionnaire table; batching rules are in
+   spec §8 (one call, ~12x cheaper than separate calls) with `batchSize` from `DEFAULTS`.
 
-**Next session should start with:** fixing item 1, then Stage 3 (pre-filter). The features added
-on 2026-09-18 land in Stage 6.
+3. **Only one listing page has ever been parsed.** The fixture is a single item; labels vary
+   between listings, so a second capture from a different seller would harden the label handling
+   before Stage 5 depends on it.
+
+4. **eBay rate-limits by volume.** After roughly 50 page loads in a day, a run returned HTTP 403
+   with the standard error page. Detail visits spend the same budget — hence `maxDetailVisits`.
+
+**Note for Stage 6:** shipping is scored in absolute dollars there, and it now actually means
+shipping. Runs stored before 2026-09-21 have prices in the shipping column.
 
 ## Self-review
 

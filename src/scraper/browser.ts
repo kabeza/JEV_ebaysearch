@@ -2,6 +2,7 @@ import { chromium, type BrowserContext, type Page } from 'playwright'
 import { mkdirSync } from 'node:fs'
 import { DEFAULTS } from '../shared/config'
 import { extractCards, type RawCard } from './cards'
+import { extractDetail, type RawDetail } from './listing'
 
 export interface LaunchOptions {
   /** Persistent profile directory. Accumulating state is what keeps eBay happy. */
@@ -40,6 +41,8 @@ export interface PageSource {
   /** Page title, used to recognise eBay's error and challenge pages. */
   title(): Promise<string>
   readCards(): Promise<RawCard[]>
+  /** Reads whatever listing page is currently open (spec §5.4). */
+  readListing(): Promise<RawDetail>
   screenshot(path: string): Promise<void>
   close(): Promise<void>
 }
@@ -52,6 +55,7 @@ export function playwrightPageSource(page: Page): PageSource {
     },
     title: () => page.title(),
     readCards: () => extractCards(page),
+    readListing: () => extractDetail(page),
     screenshot: async (path: string) => {
       await page.screenshot({ path })
     },

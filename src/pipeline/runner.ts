@@ -2,6 +2,9 @@ import { EventEmitter } from 'node:events'
 import type { Database as SqliteDatabase } from 'better-sqlite3'
 import { launchBrowser, playwrightPageSource, type PageSource } from '../scraper/browser'
 import { executeRun } from './run'
+import { requirementsFromSpec } from './prefilter'
+import { createJevClient, type JevClient } from '../jev/client'
+import { DEFAULT_ACCEPTED_CONDITIONS, type SearchRequest } from '../jev/questions'
 import { createRun, getRun, finishRun } from '../storage/runs'
 import { appendEvent, listEvents, type RunEvent } from '../storage/events'
 import { listListings } from '../storage/listings'
@@ -20,6 +23,11 @@ export interface StartRunOptions {
    * eBay. Production never passes it.
    */
   sourceFactory?: () => Promise<PageSource>
+  /**
+   * Overrides the JEV client, for the same reason. Production leaves it unset
+   * and the real client is built, which fails fast if the API key is missing.
+   */
+  judgeClientFactory?: () => JevClient
 }
 
 /** Emits every event for a run as it is appended. */
@@ -98,12 +106,27 @@ export function startRun(db: SqliteDatabase, o: StartRunOptions): number {
       const maxPrice = typeof search.spec?.max_price === 'number' ? search.spec.max_price : undefined
       const minPrice = typeof search.spec?.min_price === 'number' ? search.spec.min_price : undefined
 
+      // Built before the first page load on purpose: a missing or bad API key
+      // should fail the run in the first second, not after it has spent page
+      // loads on eBay gathering listings it can never judge.
+      const judgeClient = (o.judgeClientFactory ?? createJevClient)()
+
+      const judgeRequest: SearchRequest = {
+        keyword: search.keyword,
+        criteria_text: search.criteriaText,
+        spec: search.spec ?? {},
+        max_price: maxPrice,
+        accepted_conditions: DEFAULT_ACCEPTED_CONDITIONS,
+      }
+
       const outcome = await executeRun({
         db,
         runId: run.id,
         keyword: search.keyword,
         settings,
         source,
+        requirements: requirementsFromSpec(search.spec ?? {}),
+        judge: { client: judgeClient, batchSize: settings.batchSize, request: judgeRequest },
         minPrice,
         maxPrice,
         screenshotsDir: o.screenshotsDir ?? 'data/screenshots',

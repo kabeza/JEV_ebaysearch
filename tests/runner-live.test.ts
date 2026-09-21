@@ -5,6 +5,7 @@ import { listEvents } from '../src/storage/events'
 import { getRun } from '../src/storage/runs'
 import { startRun, subscribe, isRunning } from '../src/pipeline/runner'
 import type { PageSource } from '../src/scraper/browser'
+import type { JevAnswer, JevClient, JevRequest, JevResult } from '../src/jev/client'
 import type { RawCard } from '../src/scraper/cards'
 
 function card(itemId: string): RawCard {
@@ -25,6 +26,19 @@ function card(itemId: string): RawCard {
   }
 }
 
+/** Answers any question asked, so a live-path run behaves like a real one. */
+function fakeJevClient(): JevClient {
+  return {
+    async systemOne(req: JevRequest): Promise<JevResult> {
+      const answers: Record<string, JevAnswer> = {}
+      for (const key of Object.keys(req.questions)) {
+        answers[key] = { type: 'noul', noul: 0.9 }
+      }
+      return { model: 'fake', answers, usage: { input_tokens: 0, output_tokens: 0 } }
+    },
+  }
+}
+
 /** No browser, no network, no eBay. */
 function fakeSource(): PageSource {
   let served = 0
@@ -38,6 +52,18 @@ function fakeSource(): PageSource {
     async readCards() {
       served++
       return served === 1 ? [card('111111111'), card('222222222')] : []
+    },
+    async readListing() {
+      return {
+        title: 'Lenovo ThinkPad T14s Gen 6 32GB RAM 1TB SSD',
+        price: 1200,
+        shipping: 0,
+        condition: 'Open Box',
+        sellerName: 'store',
+        sellerFeedback: '99% positive',
+        specifics: { Brand: 'Lenovo', 'RAM Size': '32 GB' },
+        rawText: ['Brand Lenovo'],
+      }
     },
     async screenshot() {},
     async close() {},
@@ -60,8 +86,13 @@ describe('startRun live path', () => {
     const received: string[] = []
     const runId = startRun(db, {
       searchId: search.id,
-      settings: { maxPages: 1, pacingMinMs: 1, pacingMaxMs: 2 },
+      // Detail visits off: this test is about live delivery, and a real visit
+      // would pace for seconds per listing. The phase has its own tests.
+      settings: { maxPages: 1, pacingMinMs: 1, pacingMaxMs: 2, maxDetailVisits: 0 },
       sourceFactory: async () => fakeSource(),
+      // Judging is part of a run now, and the real client needs an API key, so
+      // the live-path tests inject a client the same way they inject a source.
+      judgeClientFactory: fakeJevClient,
     })
 
     // Subscribe exactly as the SSE route does, but immediately — this is the
@@ -87,8 +118,11 @@ describe('startRun live path', () => {
 
     const runId = startRun(db, {
       searchId: search.id,
-      settings: { maxPages: 1, pacingMinMs: 120, pacingMaxMs: 160 },
+      settings: { maxPages: 1, pacingMinMs: 120, pacingMaxMs: 160, maxDetailVisits: 0 },
       sourceFactory: async () => fakeSource(),
+      // Judging is part of a run now, and the real client needs an API key, so
+      // the live-path tests inject a client the same way they inject a source.
+      judgeClientFactory: fakeJevClient,
     })
 
     // Attach while the run is still going, exactly as a late browser would.
@@ -113,8 +147,11 @@ describe('startRun live path', () => {
 
     startRun(db, {
       searchId: search.id,
-      settings: { maxPages: 1, pacingMinMs: 400, pacingMaxMs: 500 },
+      settings: { maxPages: 1, pacingMinMs: 400, pacingMaxMs: 500, maxDetailVisits: 0 },
       sourceFactory: async () => fakeSource(),
+      // Judging is part of a run now, and the real client needs an API key, so
+      // the live-path tests inject a client the same way they inject a source.
+      judgeClientFactory: fakeJevClient,
     })
 
     expect(() => startRun(db, { searchId: search.id })).toThrowError(/already in progress/)

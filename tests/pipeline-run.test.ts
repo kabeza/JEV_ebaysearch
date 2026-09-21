@@ -8,14 +8,27 @@ import { createRun, getRun } from '../src/storage/runs'
 import { listEvents } from '../src/storage/events'
 import { listListings, countListings } from '../src/storage/listings'
 import { executeRun } from '../src/pipeline/run'
+import { listJudgments } from '../src/storage/judgments'
+import { createFakeJevClient, type JevAnswer } from '../src/jev/client'
+import { QUESTION_KEYS, type SearchRequest } from '../src/jev/questions'
 import { DEFAULTS } from '../src/shared/config'
 import type { PageSource } from '../src/scraper/browser'
 import type { RawCard } from '../src/scraper/cards'
+import type { RawDetail } from '../src/scraper/listing'
 
-function card(itemId: string, price: number): RawCard {
+/** What would be asked, in brief: the questions themselves have their own tests. */
+const JUDGE_REQUEST: SearchRequest = {
+  keyword: 'thinkpad',
+  criteria_text: '32gb ram',
+  spec: { ram_gb: 32 },
+  max_price: 1600,
+  accepted_conditions: ['Brand New'],
+}
+
+function card(itemId: string, price: number, title?: string): RawCard {
   return {
     itemId,
-    title: `Lenovo ThinkPad T14s Gen 6 ${itemId}`,
+    title: title ?? `Lenovo ThinkPad T14s Gen 6 ${itemId}`,
     url: `https://www.ebay.com/itm/${itemId}`,
     price,
     shipping: 0,
@@ -30,18 +43,40 @@ function card(itemId: string, price: number): RawCard {
   }
 }
 
-/** A PageSource that serves canned pages, so no browser and no network. */
+/** What a listing page yields, in the shape `extractDetail` returns. */
+function detail(overrides: Partial<RawDetail> = {}): RawDetail {
+  return {
+    title: 'Lenovo ThinkPad T14s Gen 6 32GB RAM 1TB SSD',
+    price: 1200,
+    shipping: 0,
+    condition: 'Open Box',
+    sellerName: 'store',
+    sellerFeedback: '99% positive',
+    specifics: { Brand: 'Lenovo', 'RAM Size': '32 GB' },
+    rawText: ['Brand Lenovo', 'RAM Size 32 GB'],
+    ...overrides,
+  }
+}
+
+/**
+ * A PageSource that serves canned pages, so no browser and no network.
+ * `detailFn` decides what a listing page yields; by default every listing reads
+ * back cleanly.
+ */
 function fakeSource(
   pages: Array<RawCard[] | Error>,
   status = 200,
   pageTitle = 'ThinkPad T14s Gen 6 for sale | eBay',
-): PageSource & { visited: string[]; screenshots: string[] } {
+  detailFn?: (url: string) => RawDetail | Error,
+): PageSource & { visited: string[]; screenshots: string[]; detailUrls: string[] } {
   let i = 0
   const visited: string[] = []
   const screenshots: string[] = []
+  const detailUrls: string[] = []
   return {
     visited,
     screenshots,
+    detailUrls,
     async goto(url: string) {
       visited.push(url)
       return { status }
@@ -54,6 +89,13 @@ function fakeSource(
       if (next === undefined) return []
       if (next instanceof Error) throw next
       return next
+    },
+    async readListing() {
+      const url = visited[visited.length - 1] ?? ''
+      detailUrls.push(url)
+      const result = detailFn?.(url) ?? detail()
+      if (result instanceof Error) throw result
+      return result
     },
     async screenshot(path: string) {
       screenshots.push(path)
@@ -337,6 +379,270 @@ describe('executeRun', () => {
     expect(stored?.itemId).toBe('888888888')
     expect(stored?.price).toBe(1234.56)
     expect(stored?.conditionLabel).toBe('Brand New')
-    expect(stored?.stage).toBe('card_only')
+    // The pre-filter runs on every card, so a survivor is stamped as such.
+    expect(stored?.stage).toBe('survivor')
+  })
+
+  it('stamps each card with its pre-filter verdict and reason, before JEV ever sees it', async () => {
+    const { db, run } = setup()
+    const source = fakeSource([
+      [
+        card('111111111', 100, 'ThinkPad T14s Gen 6 16GB RAM 512GB SSD'),
+        card('222222222', 100, 'ThinkPad T14s Gen 6 64GB RAM 1TB SSD'),
+      ],
+    ])
+    const published: string[] = []
+
+    const outcome = await executeRun({
+      db,
+      runId: run.id,
+      keyword: 'x',
+      settings: { ...DEFAULTS, maxPages: 1 },
+      source,
+      sleep: noSleep,
+      screenshotsDir: tmp,
+      requirements: { minRamGb: 32 },
+      publish: (e) => published.push(e.type),
+    })
+
+    const byItem = new Map(listListings(db, run.id).map((l) => [l.itemId, l]))
+    expect(byItem.get('111111111')).toMatchObject({
+      stage: 'rejected',
+      rejectReason: '16GB RAM, wanted at least 32GB',
+    })
+    expect(byItem.get('222222222')).toMatchObject({ stage: 'survivor', rejectReason: null })
+
+    // A rejected listing is still stored — the reason has to survive a refresh.
+    expect(countListings(db, run.id)).toBe(2)
+    expect(outcome.rejected).toBe(1)
+    expect(getRun(db, run.id)?.stats.rejected).toBe(1)
+
+    const filtered = listEvents(db, run.id).find((e) => e.type === 'cards.filtered')
+    expect(filtered?.payload).toMatchObject({ survivors: 1, rejected: 1 })
+    expect(published).toContain('cards.filtered')
+  })
+
+  it('keeps a card whose title says nothing, even when the requirements are demanding', async () => {
+    const { db, run } = setup()
+    // No RAM, storage, touch or CPU mentioned anywhere.
+    const source = fakeSource([[card('333333333', 100, 'Lenovo ThinkPad T14s Gen 6 Laptop 14"')]])
+
+    await executeRun({
+      db,
+      runId: run.id,
+      keyword: 'x',
+      settings: { ...DEFAULTS, maxPages: 1 },
+      source,
+      sleep: noSleep,
+      screenshotsDir: tmp,
+      requirements: { minRamGb: 64, minStorageGb: 2048, requireTouch: true, cpuVendor: 'amd' },
+    })
+
+    const [stored] = listListings(db, run.id)
+    expect(stored?.stage).toBe('survivor')
+    expect(stored?.rejectReason).toBeNull()
+  })
+
+  it('visits each survivor and stores what the listing page said', async () => {
+    const { db, run } = setup()
+    const source = fakeSource([
+      [card('111111111', 100), card('222222222', 200)],
+    ])
+
+    const outcome = await executeRun({
+      db,
+      runId: run.id,
+      keyword: 'x',
+      settings: { ...DEFAULTS, maxPages: 1 },
+      source,
+      sleep: noSleep,
+      screenshotsDir: tmp,
+      publish: () => {},
+    })
+
+    expect(outcome.status).toBe('complete')
+    expect(outcome.detailsFetched).toBe(2)
+    expect(source.detailUrls).toHaveLength(2)
+    const [first] = listListings(db, run.id)
+    expect(first?.detail?.specifics.Brand).toBe('Lenovo')
+    expect(first?.stage).toBe('survivor')
+    expect(listEvents(db, run.id).some((e) => e.type === 'listing.visited')).toBe(true)
+  })
+
+  it('never opens a listing the pre-filter rejected', async () => {
+    const { db, run } = setup()
+    const source = fakeSource([
+      [
+        card('111111111', 100, 'ThinkPad T14s Gen 6 16GB RAM 512GB SSD'),
+        card('222222222', 200, 'ThinkPad T14s Gen 6 64GB RAM 1TB SSD'),
+      ],
+    ])
+
+    await executeRun({
+      db,
+      runId: run.id,
+      keyword: 'x',
+      settings: { ...DEFAULTS, maxPages: 1 },
+      source,
+      sleep: noSleep,
+      screenshotsDir: tmp,
+      requirements: { minRamGb: 32 },
+    })
+
+    expect(source.detailUrls).toHaveLength(1)
+    expect(source.detailUrls[0]).toContain('222222222')
+  })
+
+  it('stops visiting listings at the detail cap, leaving the rest judged on card data', async () => {
+    const { db, run } = setup()
+    const source = fakeSource([
+      [card('111111111', 1), card('222222222', 2), card('333333333', 3)],
+    ])
+
+    const outcome = await executeRun({
+      db,
+      runId: run.id,
+      keyword: 'x',
+      settings: { ...DEFAULTS, maxPages: 1, maxDetailVisits: 2 },
+      source,
+      sleep: noSleep,
+      screenshotsDir: tmp,
+    })
+
+    expect(outcome.detailsFetched).toBe(2)
+    expect(countListings(db, run.id)).toBe(3)
+    const visited = listListings(db, run.id).filter((l) => l.detail !== null)
+    expect(visited).toHaveLength(2)
+    // The unvisited one is still a survivor: JEV judges it on card data alone.
+    expect(listListings(db, run.id).filter((l) => l.stage === 'survivor')).toHaveLength(3)
+  })
+
+  it('marks a listing detail_failed when its page will not read, and carries on', async () => {
+    const { db, run } = setup()
+    const source = fakeSource(
+      [[card('111111111', 100), card('222222222', 200)]],
+      200,
+      'ThinkPad',
+      (url) => (url.includes('111111111') ? new Error('page closed mid-read') : detail()),
+    )
+
+    const outcome = await executeRun({
+      db,
+      runId: run.id,
+      keyword: 'x',
+      settings: { ...DEFAULTS, maxPages: 1 },
+      source,
+      sleep: noSleep,
+      screenshotsDir: tmp,
+    })
+
+    expect(outcome.status).toBe('complete')
+    expect(outcome.detailsFailed).toBe(1)
+    const failed = listListings(db, run.id).find((l) => l.itemId === '111111111')
+    expect(failed?.stage).toBe('detail_failed')
+    // Still not a rejection: JEV must see it on card data.
+    expect(failed?.detail).toBeNull()
+    expect(listEvents(db, run.id).some((e) => e.type === 'error')).toBe(true)
+    expect(getRun(db, run.id)?.stats.detailsFailed).toBe(1)
+  })
+
+  it('fails the run when listing pages keep failing, because that is a markup change', async () => {
+    const { db, run } = setup()
+    const source = fakeSource(
+      [[card('111111111', 1), card('222222222', 2), card('333333333', 3)]],
+      200,
+      'ThinkPad',
+      () => new Error('no item specifics found'),
+    )
+
+    const outcome = await executeRun({
+      db,
+      runId: run.id,
+      keyword: 'x',
+      settings: { ...DEFAULTS, maxPages: 1 },
+      source,
+      sleep: noSleep,
+      screenshotsDir: tmp,
+    })
+
+    expect(outcome.status).toBe('failed')
+    expect(getRun(db, run.id)?.error).toMatch(/listing pages/i)
+    // A screenshot is the evidence a markup change leaves behind.
+    expect(source.screenshots.length).toBeGreaterThan(0)
+  })
+
+  it('judges the survivors and records the answers in the run event log', async () => {
+    const { db, run } = setup()
+    const source = fakeSource([[card('111111111', 100), card('222222222', 200)]])
+    const answers: Record<string, JevAnswer> = {}
+    for (const label of ['L1', 'L2']) {
+      for (const key of QUESTION_KEYS) {
+        answers[`${label}.${key}`] = { type: 'noul', noul: 0.91 }
+      }
+    }
+    const client = createFakeJevClient(answers, { input_tokens: 1_000_000, output_tokens: 0 })
+
+    const outcome = await executeRun({
+      db,
+      runId: run.id,
+      keyword: 'x',
+      settings: { ...DEFAULTS, maxPages: 1 },
+      source,
+      sleep: noSleep,
+      screenshotsDir: tmp,
+      judge: { client, batchSize: 10, request: JUDGE_REQUEST },
+    })
+
+    expect(outcome.judged).toBe(2)
+    expect(outcome.costUsd).toBeCloseTo(0.042, 6)
+    expect(getRun(db, run.id)?.stats.judged).toBe(2)
+    // Stored as an event, so a browser that refreshes replays the answers.
+    expect(listEvents(db, run.id).some((e) => e.type === 'judgments.received')).toBe(true)
+    expect(listJudgments(db, run.id)).toHaveLength(12)
+  })
+
+  it('fails the run loudly when JEV refuses a listing outright', async () => {
+    const { db, run } = setup()
+    const source = fakeSource([[card('111111111', 100)]])
+    const client = {
+      async systemOne(): Promise<never> {
+        throw new Error('422 Unprocessable Entity')
+      },
+    }
+
+    const outcome = await executeRun({
+      db,
+      runId: run.id,
+      keyword: 'x',
+      settings: { ...DEFAULTS, maxPages: 1 },
+      source,
+      sleep: noSleep,
+      screenshotsDir: tmp,
+      judge: { client, batchSize: 10, request: JUDGE_REQUEST },
+    })
+
+    expect(outcome.status).toBe('failed')
+    expect(getRun(db, run.id)?.error).toMatch(/could not be judged/i)
+  })
+
+  it('rejects on price when shipping is what pushes it over', async () => {
+    const { db, run } = setup()
+    const over = { ...card('444444444', 1190), shipping: 25 }
+    const source = fakeSource([[over]])
+
+    await executeRun({
+      db,
+      runId: run.id,
+      keyword: 'x',
+      settings: { ...DEFAULTS, maxPages: 1 },
+      source,
+      sleep: noSleep,
+      screenshotsDir: tmp,
+      requirements: { maxPrice: 1200 },
+    })
+
+    const [stored] = listListings(db, run.id)
+    expect(stored?.stage).toBe('rejected')
+    expect(stored?.rejectReason).toBe('$1,190.00 + $25.00 shipping is over the $1,200 limit')
   })
 })

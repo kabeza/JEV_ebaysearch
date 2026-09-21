@@ -36,18 +36,35 @@ describe('parsePrice', () => {
 
 describe('parseShipping', () => {
   it('parses a shipping amount', () => {
-    expect(parseShipping('+$79.99 shipping')).toBe(79.99)
+    expect(parseShipping(['+$79.99 shipping'])).toBe(79.99)
+  })
+
+  it('reads the shipping row, never the price row that comes before it', () => {
+    // The real row order on every eBay card. Reading the first number in the
+    // joined text returned the price as the shipping cost — 59 cards out of 60
+    // in the fixture, and most paid-shipping cards in a live run.
+    const rows = ['$1,549.00', 'Buy It Now', '+$79.99 shipping', '11 watchers']
+    expect(parseShipping(rows)).toBe(79.99)
+  })
+
+  it('keeps looking past a shipping row that carries no number', () => {
+    const rows = ['$381.00', 'eBay International Shipping', '+$63.12 shipping']
+    expect(parseShipping(rows)).toBe(63.12)
   })
 
   it('treats free shipping as zero', () => {
-    expect(parseShipping('Free shipping')).toBe(0)
-    expect(parseShipping('Free International Shipping')).toBe(0)
-    expect(parseShipping('Free delivery')).toBe(0)
+    expect(parseShipping(['Free shipping'])).toBe(0)
+    expect(parseShipping(['Free International Shipping'])).toBe(0)
+    expect(parseShipping(['$99.00', 'Free delivery'])).toBe(0)
   })
 
   it('returns null when shipping is not mentioned', () => {
-    expect(parseShipping('Buy It Now')).toBeNull()
-    expect(parseShipping('')).toBeNull()
+    expect(parseShipping(['$1,549.00', 'Buy It Now'])).toBeNull()
+    expect(parseShipping([])).toBeNull()
+  })
+
+  it('returns null when shipping is mentioned without a cost', () => {
+    expect(parseShipping(['$99.00', 'Shipping not specified'])).toBeNull()
   })
 })
 
@@ -194,6 +211,9 @@ describe('extractCards against the captured results page', () => {
       'Pre-Owned',
       'Used',
       'For parts or not working',
+      // eBay states a brand-new item as either "Brand New" or plain "New",
+      // depending on the surface.
+      'New',
     ]
     for (const c of cards) {
       if (c.conditionLabel !== null) expect(known).toContain(c.conditionLabel)
@@ -206,5 +226,30 @@ describe('extractCards against the captured results page', () => {
     const cards = await extractCards(page)
     const withRows = cards.filter((c) => c.rawText.length > 0)
     expect(withRows.length).toBeGreaterThan(0)
+  })
+
+  it('reads the real shipping cost from a card that charges for it', async () => {
+    // This card's rows start with its own price, which is what the old parser
+    // returned as the shipping cost.
+    const cards = await extractCards(page)
+    const card = cards.find((c) => c.price === 1549)
+    expect(card?.title).toContain('Snapdragon')
+    expect(card?.shipping).toBe(79.99)
+  })
+
+  it('never reports an item price as its shipping cost', async () => {
+    const cards = await extractCards(page)
+    const both = cards.filter((c) => c.price !== null && c.shipping !== null)
+    expect(both.length).toBeGreaterThan(0)
+    expect(both.filter((c) => c.shipping === c.price)).toEqual([])
+  })
+
+  it('leaves paid shipping null rather than zero when eBay states no cost', async () => {
+    const cards = await extractCards(page)
+    for (const c of cards) {
+      expect(c.shipping === null || Number.isFinite(c.shipping)).toBe(true)
+    }
+    // Free shipping is a real, common answer on this page.
+    expect(cards.some((c) => c.shipping === 0)).toBe(true)
   })
 })

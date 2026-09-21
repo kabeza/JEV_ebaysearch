@@ -2,12 +2,22 @@ import Fastify, { type FastifyInstance } from 'fastify'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { openDatabase } from '../storage/db'
+import type { PageSource } from '../scraper/browser'
+import type { JevClient } from '../jev/client'
 import { registerSearchRoutes } from './routes/searches'
 import { registerRunRoutes } from './routes/runs'
 
 export interface ServerOptions {
   dbPath?: string
   logger?: boolean
+  /**
+   * Overrides how a run gets its pages. Production leaves this unset and a real
+   * browser is launched; a script can pass a fake source to exercise the whole
+   * server — run, SSE stream, UI — with no browser and no eBay.
+   */
+  sourceFactory?: () => Promise<PageSource>
+  /** See `StartRunOptions.judgeClientFactory`. Unset in production. */
+  judgeClientFactory?: () => JevClient
 }
 
 export function buildServer(opts: ServerOptions = {}): FastifyInstance {
@@ -18,7 +28,10 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
   const db = openDatabase(dbPath)
 
   registerSearchRoutes(app, db)
-  registerRunRoutes(app, db)
+  registerRunRoutes(app, db, {
+    sourceFactory: opts.sourceFactory,
+    judgeClientFactory: opts.judgeClientFactory,
+  })
   app.addHook('onClose', async () => db.close())
 
   return app

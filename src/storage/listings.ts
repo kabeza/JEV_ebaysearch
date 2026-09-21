@@ -1,5 +1,6 @@
 import type { Database as SqliteDatabase } from 'better-sqlite3'
 import type { RawCard } from '../scraper/cards'
+import type { RawDetail } from '../scraper/listing'
 
 export type ListingStage = 'card_only' | 'rejected' | 'survivor' | 'detail_failed' | 'judged'
 
@@ -8,6 +9,8 @@ export interface StoredListing extends RawCard {
   runId: number
   stage: ListingStage
   rejectReason: string | null
+  /** What the listing page said, or null when it was never visited / failed. */
+  detail: RawDetail | null
 }
 
 interface Row {
@@ -25,6 +28,7 @@ interface Row {
   stage: ListingStage
   reject_reason: string | null
   raw_card_json: string | null
+  raw_detail_json: string | null
 }
 
 function toListing(row: Row): StoredListing {
@@ -51,14 +55,29 @@ function toListing(row: Row): StoredListing {
     rawText: raw.rawText ?? [],
     stage: row.stage,
     rejectReason: row.reject_reason,
+    detail: row.raw_detail_json ? (JSON.parse(row.raw_detail_json) as RawDetail) : null,
   }
+}
+
+export interface InsertCardsResult {
+  /** Every card in the batch, including ones already stored, keyed by eBay item id. */
+  idsByItemId: Map<string, number>
+  /** How many rows were newly inserted. */
+  stored: number
 }
 
 /**
  * Stores the cards from one results page. Idempotent per run: a card already
  * stored for this run is skipped, so a re-fetched page cannot duplicate rows.
+ *
+ * Returns the row id of every card in the batch — not just the new ones — so the
+ * caller can stamp each row with its pre-filter verdict without a second lookup.
  */
-export function insertCards(db: SqliteDatabase, runId: number, cards: RawCard[]): number {
+export function insertCards(
+  db: SqliteDatabase,
+  runId: number,
+  cards: RawCard[],
+): InsertCardsResult {
   const insert = db.prepare(
     `insert into listings
        (run_id, ebay_item_id, title, url, price, shipping, currency,
@@ -69,15 +88,16 @@ export function insertCards(db: SqliteDatabase, runId: number, cards: RawCard[])
   )
 
   const existing = db
-    .prepare('select ebay_item_id from listings where run_id = ?')
-    .all(runId) as { ebay_item_id: string }[]
-  const seen = new Set(existing.map((r) => r.ebay_item_id))
+    .prepare('select id, ebay_item_id from listings where run_id = ?')
+    .all(runId) as { id: number; ebay_item_id: string }[]
+  const idsByItemId = new Map(existing.map((r) => [r.ebay_item_id, r.id]))
+  const seen = new Set(idsByItemId.keys())
 
   let inserted = 0
   const tx = db.transaction((rows: RawCard[]) => {
     for (const c of rows) {
       if (seen.has(c.itemId)) continue
-      insert.run({
+      const info = insert.run({
         runId,
         itemId: c.itemId,
         title: c.title,
@@ -95,11 +115,51 @@ export function insertCards(db: SqliteDatabase, runId: number, cards: RawCard[])
         }),
       })
       seen.add(c.itemId)
+      idsByItemId.set(c.itemId, Number(info.lastInsertRowid))
       inserted++
     }
   })
   tx(cards)
-  return inserted
+  return { idsByItemId, stored: inserted }
+}
+
+/** Stores what the listing page said, alongside the card data — never over it. */
+export function updateListingDetail(
+  db: SqliteDatabase,
+  listingId: number,
+  detail: RawDetail,
+): void {
+  db.prepare('update listings set raw_detail_json = ? where id = ?').run(
+    JSON.stringify(detail),
+    listingId,
+  )
+}
+
+/**
+ * The survivors of a run, in the order they came off the results pages — which
+ * is eBay's relevance order, and the order detail visits should follow.
+ */
+export function listSurvivors(db: SqliteDatabase, runId: number, limit?: number): StoredListing[] {
+  const rows = (limit === undefined
+    ? db.prepare("select * from listings where run_id = ? and stage = 'survivor' order by id").all(runId)
+    : db
+        .prepare("select * from listings where run_id = ? and stage = 'survivor' order by id limit ?")
+        .all(runId, limit)) as Row[]
+  return rows.map(toListing)
+}
+
+/** Records a pre-filter verdict on a listing. */
+export function updateListingStage(
+  db: SqliteDatabase,
+  listingId: number,
+  stage: ListingStage,
+  rejectReason: string | null,
+): void {
+  db.prepare('update listings set stage = ?, reject_reason = ? where id = ?').run(
+    stage,
+    rejectReason,
+    listingId,
+  )
 }
 
 export function listListings(db: SqliteDatabase, runId: number): StoredListing[] {

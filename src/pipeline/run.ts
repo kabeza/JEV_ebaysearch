@@ -4,9 +4,19 @@ import { join } from 'node:path'
 import { buildSearchUrl } from '../scraper/url'
 import { pace, type PageSource } from '../scraper/browser'
 import type { RawCard } from '../scraper/cards'
-import { insertCards } from '../storage/listings'
+import {
+  insertCards,
+  listSurvivors,
+  updateListingDetail,
+  updateListingStage,
+  type StoredListing,
+} from '../storage/listings'
 import { appendEvent, type RunEvent } from '../storage/events'
 import { finishRun, updateRunStats, type RunStatus } from '../storage/runs'
+import { prefilter, type Requirements } from './prefilter'
+import { judgeSurvivors } from './judge'
+import type { JevClient } from '../jev/client'
+import type { SearchRequest } from '../jev/questions'
 import type { RunSettings } from '../shared/config'
 
 export interface ExecuteRunOptions {
@@ -15,6 +25,17 @@ export interface ExecuteRunOptions {
   keyword: string
   settings: RunSettings
   source: PageSource
+  /**
+   * What the search asked for. Every card is judged against these the moment it
+   * is stored, and only survivors are worth a listing-page visit and a JEV call.
+   * Omitted means nothing can be contradicted, so every card survives.
+   */
+  requirements?: Requirements
+  /**
+   * JEV judging, run after the survivors' pages have been read. Omitted means
+   * the run scrapes and stores but asks nothing.
+   */
+  judge?: { client: JevClient; batchSize: number; request: SearchRequest }
   minPrice?: number
   maxPrice?: number
   /** Directory for failure screenshots. */
@@ -40,7 +61,25 @@ export interface RunOutcome {
   pagesFetched: number
   cardsSeen: number
   listingsStored: number
+  /** Stored, but stopped by the pre-filter before they could reach JEV. */
+  rejected: number
+  /** Survivors whose listing page was opened and read. */
+  detailsFetched: number
+  /** Survivors whose page would not read; they still reach JEV on card data. */
+  detailsFailed: number
+  /** Survivors that got answers from JEV. */
+  judged: number
+  /** Answers JEV did not return, reported rather than glossed over. */
+  judgmentsMissing: number
+  jevInputTokens: number
+  costUsd: number
 }
+
+/**
+ * How many listing pages must fail in a row before it stops looking like unlucky
+ * listings and starts looking like eBay having changed its markup.
+ */
+const CONSECUTIVE_DETAIL_FAILURES_TO_ABORT = 3
 
 /** Text eBay shows when it is refusing or challenging a request. */
 const CHALLENGE_MARKERS = [
@@ -53,6 +92,38 @@ const CHALLENGE_MARKERS = [
 
 function looksLikeChallenge(title: string): boolean {
   return CHALLENGE_MARKERS.some((m) => title.toLowerCase().includes(m.toLowerCase()))
+}
+
+/**
+ * Stamps every stored card with its pre-filter verdict — rejected or survivor —
+ * and reports what happened, so the UI and the event log can show the filter
+ * working rather than silently dropping rows.
+ */
+function applyPrefilter(
+  db: SqliteDatabase,
+  idsByItemId: Map<string, number>,
+  cards: RawCard[],
+  requirements: Requirements,
+): { rejected: number; survivors: number; reasons: { title: string; reason: string }[] } {
+  let rejected = 0
+  let survivors = 0
+  const reasons: { title: string; reason: string }[] = []
+
+  for (const card of cards) {
+    const id = idsByItemId.get(card.itemId)
+    if (id === undefined) continue
+    const decision = prefilter(card, requirements)
+    updateListingStage(db, id, decision.stage, decision.reason)
+    if (decision.stage === 'rejected') {
+      rejected++
+      // Enough to see what the filter is doing, without shipping every title.
+      if (reasons.length < 10) reasons.push({ title: card.title, reason: decision.reason })
+    } else {
+      survivors++
+    }
+  }
+
+  return { rejected, survivors, reasons }
 }
 
 /**
@@ -71,6 +142,13 @@ export async function executeRun(o: ExecuteRunOptions): Promise<RunOutcome> {
   let pagesFetched = 0
   let cardsSeen = 0
   let listingsStored = 0
+  let rejected = 0
+  let detailsFetched = 0
+  let detailsFailed = 0
+  let judged = 0
+  let jevInputTokens = 0
+  let costUsd = 0
+  let judgmentsMissing = 0
 
   const emit = (type: Parameters<typeof appendEvent>[2], payload: unknown) => {
     const event = appendEvent(o.db, o.runId, type, payload)
@@ -78,19 +156,99 @@ export async function executeRun(o: ExecuteRunOptions): Promise<RunOutcome> {
     return event
   }
 
-  const progress = () => updateRunStats(o.db, o.runId, { pagesFetched, cardsSeen, listingsStored })
+  const stats = () => ({
+    pagesFetched,
+    cardsSeen,
+    listingsStored,
+    rejected,
+    detailsFetched,
+    detailsFailed,
+    judged,
+    jevInputTokens,
+    costUsd,
+    judgmentsMissing,
+  })
+
+  const progress = () => updateRunStats(o.db, o.runId, stats())
 
   const stopWith = (status: RunStatus, error?: string): RunOutcome => {
-    finishRun(o.db, o.runId, {
-      status,
-      error: error ?? null,
-      stats: { pagesFetched, cardsSeen, listingsStored },
-    })
+    finishRun(o.db, o.runId, { status, error: error ?? null, stats: stats() })
     emit(
       status === 'failed' ? 'run.failed' : status === 'cancelled' ? 'run.cancelled' : 'run.finished',
-      { status, pagesFetched, cardsSeen, listingsStored, error: error ?? null },
+      { status, ...stats(), error: error ?? null },
     )
-    return { status, pagesFetched, cardsSeen, listingsStored }
+    return { status, ...stats() }
+  }
+
+  /**
+   * Opens each survivor's listing page, in card order, up to the cap.
+   *
+   * One listing that will not read is bad luck and costs that listing only: it is
+   * marked `detail_failed` and still reaches JEV on its card data. Several in a
+   * row is not bad luck, it is eBay having changed its markup — that returns a
+   * message and fails the run loudly, with a screenshot, rather than quietly
+   * producing a run full of card-only listings.
+   */
+  const visitSurvivors = async (): Promise<string | null> => {
+    if (o.settings.maxDetailVisits <= 0) return null
+
+    const survivors = listSurvivors(o.db, o.runId, o.settings.maxDetailVisits)
+    let consecutiveFailures = 0
+    let lastReason = ''
+
+    const fail = (listing: StoredListing, reason: string) => {
+      detailsFailed++
+      consecutiveFailures++
+      lastReason = reason
+      // The reason goes to the event log rather than the listing row: the row's
+      // reject_reason means "the pre-filter stopped this one", which is a
+      // different claim from "we could not read its page".
+      updateListingStage(o.db, listing.id, 'detail_failed', null)
+      emit('error', { reason: 'detail_failed', itemId: listing.itemId, message: reason })
+    }
+
+    for (const listing of survivors) {
+      if (o.isCancelled?.()) return null
+      if (now() >= deadline) {
+        emit('run.progress', { note: 'time cap reached during listing visits', detailsFetched })
+        return null
+      }
+
+      const res = await o.source.goto(listing.url)
+      if (res.status !== 200) {
+        fail(listing, `listing page returned HTTP ${res.status}`)
+      } else {
+        try {
+          const detail = await o.source.readListing()
+          updateListingDetail(o.db, listing.id, detail)
+          detailsFetched++
+          consecutiveFailures = 0
+          emit('listing.visited', {
+            itemId: listing.itemId,
+            url: listing.url,
+            specifics: Object.keys(detail.specifics).length,
+          })
+        } catch (err) {
+          fail(listing, err instanceof Error ? err.message : String(err))
+        }
+      }
+
+      progress()
+
+      if (consecutiveFailures >= CONSECUTIVE_DETAIL_FAILURES_TO_ABORT) {
+        mkdirSync(screenshotsDir, { recursive: true })
+        const shotPath = join(screenshotsDir, `run${o.runId}-listing-nolayout.png`)
+        await o.source.screenshot(shotPath).catch(() => {})
+        return (
+          `${consecutiveFailures} listing pages in a row could not be read ` +
+          `(last: ${lastReason}). eBay's listing layout may have changed. Screenshot: ${shotPath}`
+        )
+      }
+
+      await sleep()
+    }
+
+    return null
   }
 
   try {
@@ -143,11 +301,20 @@ export async function executeRun(o: ExecuteRunOptions): Promise<RunOutcome> {
 
       pagesFetched++
       cardsSeen += cards.length
-      const inserted = insertCards(o.db, o.runId, cards)
-      listingsStored += inserted
+      const { idsByItemId, stored } = insertCards(o.db, o.runId, cards)
+      listingsStored += stored
+
+      const verdicts = applyPrefilter(o.db, idsByItemId, cards, o.requirements ?? {})
+      rejected += verdicts.rejected
 
       emit('page.fetched', { page, url, returned: cards.length })
       emit('cards.extracted', { page, cards: cards.slice(0, 20) })
+      emit('cards.filtered', {
+        page,
+        rejected: verdicts.rejected,
+        survivors: verdicts.survivors,
+        reasons: verdicts.reasons,
+      })
       progress()
 
       // A page that parses to zero real listings means the layout moved under us.
@@ -157,6 +324,29 @@ export async function executeRun(o: ExecuteRunOptions): Promise<RunOutcome> {
       }
 
       await sleep()
+    }
+
+    const detailFailure = await visitSurvivors()
+    if (detailFailure) return stopWith('failed', detailFailure)
+
+    if (o.judge) {
+      const verdicts = await judgeSurvivors({
+        db: o.db,
+        runId: o.runId,
+        request: o.judge.request,
+        client: o.judge.client,
+        batchSize: o.judge.batchSize,
+        emit,
+        isCancelled: o.isCancelled,
+      })
+      judged = verdicts.judged
+      jevInputTokens = verdicts.inputTokens
+      costUsd = verdicts.costUsd
+      judgmentsMissing = verdicts.missingAnswers
+      // Judging is the point of the run: without answers there is no report, so
+      // stopping here must be visible rather than a run that quietly did less.
+      if (verdicts.cancelled) return stopWith('cancelled')
+      progress()
     }
 
     return stopWith('complete')

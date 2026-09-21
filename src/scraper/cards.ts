@@ -63,7 +63,15 @@ export const CONDITION_LABELS = [
   'Pre-Owned',
   'Used',
   'For parts or not working',
+  // Last on purpose. eBay's listing pages state a new item as "New: A
+  // brand-new, unused, unopened…", and nothing earlier in this list matches it.
+  // Keeping it last means every more specific label still wins.
+  'New',
 ] as const
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
 
 /** Filler cards eBay injects at the top of every results page. */
 export function isPlaceholderCard(urlOrTitle: string): boolean {
@@ -79,12 +87,23 @@ export function parsePrice(text: string): number | null {
   return Number.isFinite(n) ? n : null
 }
 
-/** "+$79.99 shipping" -> 79.99. "Free shipping" -> 0. Absent -> null. */
-export function parseShipping(text: string): number | null {
-  if (/free\s+(shipping|delivery|international shipping|returns)/i.test(text)) return 0
-  if (!/shipping|delivery/i.test(text)) return null
-  const m = text.replace(/,/g, '').match(/\d+(?:\.\d+)?/)
-  return m ? Number(m[0]) : null
+/**
+ * Reads the shipping cost out of a card's attribute rows.
+ *
+ * Row by row, never from the joined text: the first row on every card is the
+ * item's own price, so a single `match` over the whole blob returned the price
+ * as the shipping cost on every card that charged for shipping. Rows that
+ * mention shipping without naming a cost ("Shipping not specified") are
+ * null — an unknown cost is not a free one.
+ */
+export function parseShipping(rows: string[]): number | null {
+  for (const row of rows) {
+    if (/free\s+(shipping|delivery|international shipping)/i.test(row)) return 0
+    if (!/\b(shipping|delivery)\b/i.test(row)) continue
+    const m = row.replace(/,/g, '').match(/\d+(?:\.\d+)?/)
+    if (m) return Number(m[0])
+  }
+  return null
 }
 
 /**
@@ -94,10 +113,17 @@ export function parseShipping(text: string): number | null {
  * item specifics such as "Lenovo · 512 GB". Returning null for unrecognised
  * text is deliberate: a null is honest input for JEV, junk recorded as fact is
  * not.
+ *
+ * Matching is on word boundaries, not substrings. A plain `includes` read the
+ * condition description "New: A brand-new, unused, unopened, undamaged item" as
+ * **Used**, because "unused" contains "used" — a new laptop reported to JEV as
+ * second-hand. Labels are tried in order, so the more specific ones win.
  */
 export function matchCondition(text: string): string | null {
+  const lower = text.toLowerCase()
   for (const label of CONDITION_LABELS) {
-    if (text.toLowerCase().includes(label.toLowerCase())) return label
+    const pattern = new RegExp(`\\b${escapeRegExp(label.toLowerCase())}\\b`)
+    if (pattern.test(lower)) return label
   }
   return null
 }
@@ -150,7 +176,7 @@ export function toRawCard(f: CardDomFields): RawCard | null {
     title: f.title.replace(/Opens in a new window or tab/g, '').trim(),
     url: f.url,
     price: parsePrice(f.priceText),
-    shipping: parseShipping(allRows.join(' ')),
+    shipping: parseShipping(allRows),
     currency: 'USD',
     conditionLabel: matchCondition(f.subtitleText),
     sellerName: seller.name,

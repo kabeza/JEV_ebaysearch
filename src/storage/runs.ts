@@ -18,6 +18,8 @@ export interface RunStats {
   cardsSeen?: number
   placeholdersSkipped?: number
   listingsStored?: number
+  /** Cards the code pre-filter stopped before they could cost a JEV call. */
+  rejected?: number
   [key: string]: unknown
 }
 

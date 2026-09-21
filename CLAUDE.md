@@ -34,8 +34,11 @@ node --import tsx scripts/probe-access.ts     # the headless-vs-headed access ma
 ```
 src/shared/types + config   DEFAULTS, PRICING, LIMITS, MODEL_ALIAS, estimateCostUsd
 src/storage/                schema.sql + db/runs/listings/events/searches repositories
-src/scraper/                url.ts (buildSearchUrl), cards.ts (extractCards), browser.ts
-src/pipeline/               run.ts (executeRun), runner.ts (startRun, one run at a time)
+src/scraper/                url.ts (buildSearchUrl), cards.ts (extractCards),
+                            listing.ts (extractDetail), browser.ts (PageSource)
+src/pipeline/               run.ts (executeRun), runner.ts (startRun, one run at a time),
+                            prefilter.ts, judge.ts (judgeSurvivors)
+src/jev/                    client.ts (JevClient + fake), env.ts, questions.ts, batch.ts
 src/server/                 Fastify routes: searches, runs, SSE event stream
 web/                        Vite + React + TS + Tailwind
 tests/fixtures/ebay/        real captured eBay HTML, used for offline scraper tests
@@ -93,7 +96,9 @@ These were established by probing the live site. Do not replace them with assump
 
 10. **eBay rate-limits by volume.** Roughly 50 page loads in a day earned a 403 with eBay's error
     page. It recovered on its own. The agreed caps (25 pages / 10 minutes) exist for time and
-    politeness; cost is not the constraint.
+    politeness; cost is not the constraint. **Listing detail visits spend the same budget** — one
+    page load each — which is why `maxDetailVisits` (default 20) caps them per run. Survivors past
+    the cap are still judged, on card data alone.
 
 11. **JEV is stateless.** It answers questions, it does not remember your search and it cannot write
     questions. Bundle independent questions into **one** call — TypeSafe measure this at ~12x
@@ -101,7 +106,33 @@ These were established by probing the live site. Do not replace them with assump
     batch size. Pricing is $0.042/Mtok input, output free.
 
 12. **`legend` and `probabilities` on a score answer are keyed by STRING index** (`"0"`, `"1"`…),
-    not integers. Assuming numbers renders blank cells.
+    not integers. Assuming numbers renders blank cells. And **`score` is not that index** — it is a
+    probability-weighted value on the same scale: a five-level answer comes back as `score: 2.18`
+    with `confidence: 0.27` and probabilities `{"0":0.04,"1":0.27,…}`. So a score answer lives on
+    0…n-1 (n-1 high) while a noul answer lives on 0…1, and anything that blends them must normalise
+    first. Verified against `jev-1.13.0` on 2026-09-21.
+
+13. **The dev server does NOT hot-reload.** `tsx` runs the source once; editing anything under
+    `src/` has no effect until `dev:server` is restarted. A stale process keeps writing events to
+    SQLite while publishing nothing to the SSE bus — so a run looks dead live, yet a fresh page or
+    a `curl` afterwards shows a perfect stream, because that is the replay. This exact false
+    positive cost a debugging cycle. Restart the server after any `src/` change, and verify live
+    delivery with `tests/server-events-stream.test.ts` rather than by reading a stream after the
+    fact.
+
+14. **A card's first attribute row is its own price.** `parseShipping` used to take the first
+    number in the `join`ed rows, which returned the *price* as the shipping cost on every card that
+    charged for shipping — 59 of 60 fixture cards, and 11 of 60 in a live run. Free-shipping cards
+    escaped only because that branch returns 0 first. Read attribute rows one at a time; never infer
+    a field from a concatenation of rows.
+
+15. **A listing page states `N\A` and writes prose into value slots.** Item specifics is a `<dl>`
+    of alternating `dt.ux-labels-values__labels` / `dd.ux-labels-values__values` (verified
+    2026-09-21). Two of its values are not values: `N\A` is eBay's placeholder for a field it does
+    not know, and the `Condition` row is a paragraph of boilerplate ending in "See all condition
+    definitions". Both are dropped or reduced to a vocabulary label — feeding them to JEV would be
+    recording junk as fact. Labels vary per listing, so key the map by eBay's own label rather than
+    assuming names like "RAM Size" exist.
 
 ## Conventions
 
@@ -119,14 +150,22 @@ These were established by probing the live site. Do not replace them with assump
 
 ## Current state
 
-Stage 0 and Stage 1 complete. Stage 2 roughly 85% complete. 75 tests passing, typecheck clean.
+Stages 0–5 complete (Stage 5 = JEV judgments). 211 tests passing, typecheck clean.
 
-Scraping is verified working: 113 listings from a 2-page run, prices parsed 113/113, shipping
-captured for all, URLs valid.
+Scraping is verified working: 113 listings from a 2-page run, prices parsed 113/113, URLs valid.
+Shipping is parsed correctly since 2026-09-21 — before that fix it stored the item price as the
+shipping cost on every card that charged for shipping (rule 14). Runs stored before that date carry
+wrong shipping values; nothing re-reads them yet.
 
-**The one known-broken thing:** the live results table in `RunView.tsx` does not update during a
-run. The server stream is proven correct (raw `EventSource` in the same page receives everything);
-the break is in React. Instrument the handlers rather than theorising.
+The pre-filter rejects only clear contradictions, and a rejected listing never reaches JEV, so a
+wrong reject is unrecoverable: unknown or ambiguous titles must always survive.
+
+**The live-table bug of 2026-09-18 does not reproduce.** Four scenarios were exercised in a real
+browser — fast fake source, real Playwright with real `extractCards`, an 18s idle gap before the
+first event, and a second run in the same page — and rows streamed in every time. The likeliest
+cause was a stale `dev:server` process from before the publish fix (see rule 13), whose replay made
+a broken push look healthy. `tests/server-events-stream.test.ts` now guards live push at the HTTP
+layer, which is the layer that had no test.
 
 ## Design decisions already settled
 

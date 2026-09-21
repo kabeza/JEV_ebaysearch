@@ -1,10 +1,18 @@
 import type { Database as SqliteDatabase } from 'better-sqlite3'
 
+/**
+ * What the search is looking for. These are the pre-filter's requirements, so
+ * they are stated as wants rather than facts: `ram_gb: 32` means "at least
+ * 32GB", not "exactly 32GB". `cpu_family` is free text and only becomes a
+ * requirement when a single vendor can be read out of it.
+ */
 export interface SearchSpec {
   cpu_family?: string
   ram_gb?: number
   storage_gb?: number
   touch?: boolean
+  max_price?: number
+  min_price?: number
   [key: string]: unknown
 }
 

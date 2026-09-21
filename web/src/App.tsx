@@ -1,14 +1,42 @@
 import { useEffect, useState } from 'react'
 import { createSearch, listSearches, startRun, type Search } from './lib/api'
+import { EMPTY_SPEC_FORM, specFromForm, summariseSpec, type SpecFormValues } from './lib/spec'
 import RunView from './components/RunView'
+
+function Field({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  placeholder: string
+}) {
+  return (
+    <label className="block">
+      <span className="text-sm text-lilac-ash">{label}</span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="mt-1 w-full rounded border border-lilac-ash/40 bg-space-indigo p-2"
+      />
+    </label>
+  )
+}
 
 export default function App() {
   const [searches, setSearches] = useState<Search[]>([])
   const [name, setName] = useState('')
   const [keyword, setKeyword] = useState('')
   const [criteriaText, setCriteriaText] = useState('')
+  const [specForm, setSpecForm] = useState<SpecFormValues>(EMPTY_SPEC_FORM)
   const [error, setError] = useState<string | null>(null)
-  const [runId, setRunId] = useState<number | null>(null)
+  const [activeRun, setActiveRun] = useState<{ id: number; spec: Record<string, unknown> } | null>(
+    null,
+  )
 
   async function refresh() {
     try {
@@ -26,10 +54,11 @@ export default function App() {
     e.preventDefault()
     setError(null)
     try {
-      await createSearch({ name, keyword, criteriaText })
+      await createSearch({ name, keyword, criteriaText, spec: specFromForm(specForm) })
       setName('')
       setKeyword('')
       setCriteriaText('')
+      setSpecForm(EMPTY_SPEC_FORM)
       await refresh()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -68,6 +97,50 @@ export default function App() {
               className="mt-1 w-full rounded border border-lilac-ash/40 bg-space-indigo p-2"
             />
           </label>
+
+          {/*
+            These are the requirements the code pre-filter applies before any
+            listing is worth a page visit or a JEV call. Blank means no
+            requirement — a card is then never rejected on that field.
+          */}
+          <fieldset className="space-y-3 rounded border border-lilac-ash/30 p-3">
+            <legend className="px-1 text-sm text-lilac-ash">Requirements (optional)</legend>
+            <div className="grid grid-cols-2 gap-3">
+              <Field
+                label="Max price (USD)"
+                value={specForm.maxPrice}
+                onChange={(v) => setSpecForm({ ...specForm, maxPrice: v })}
+                placeholder="1600"
+              />
+              <Field
+                label="Min RAM (GB)"
+                value={specForm.ramGb}
+                onChange={(v) => setSpecForm({ ...specForm, ramGb: v })}
+                placeholder="32"
+              />
+              <Field
+                label="Min storage (GB)"
+                value={specForm.storageGb}
+                onChange={(v) => setSpecForm({ ...specForm, storageGb: v })}
+                placeholder="1000"
+              />
+              <Field
+                label="CPU family"
+                value={specForm.cpuFamily}
+                onChange={(v) => setSpecForm({ ...specForm, cpuFamily: v })}
+                placeholder="AMD Ryzen"
+              />
+            </div>
+            <label className="flex items-center gap-2 text-sm text-lilac-ash">
+              <input
+                type="checkbox"
+                checked={specForm.touch}
+                onChange={(e) => setSpecForm({ ...specForm, touch: e.target.checked })}
+              />
+              Touchscreen required
+            </label>
+          </fieldset>
+
           <button
             type="submit"
             className="rounded bg-almond-silk px-4 py-2 font-medium text-space-indigo disabled:opacity-40"
@@ -85,38 +158,56 @@ export default function App() {
           <p className="text-lilac-ash/70">Nothing saved yet.</p>
         ) : (
           <ul className="space-y-3">
-            {searches.map((s) => (
-              <li key={s.id} className="rounded border border-lilac-ash/30 p-4">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <p className="font-medium text-almond-silk">{s.name}</p>
-                    <p className="text-sm text-lilac-ash">{s.keyword}</p>
+            {searches.map((s) => {
+              const requirements = summariseSpec(s.spec ?? {})
+              return (
+                <li key={s.id} className="rounded border border-lilac-ash/30 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="font-medium text-almond-silk">{s.name}</p>
+                      <p className="text-sm text-lilac-ash">{s.keyword}</p>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        setError(null)
+                        try {
+                          const { runId } = await startRun(s.id)
+                          setActiveRun({ id: runId, spec: s.spec ?? {} })
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : String(err))
+                        }
+                      }}
+                      className="rounded bg-almond-silk px-3 py-1.5 text-sm font-medium text-space-indigo"
+                    >
+                      Run search
+                    </button>
                   </div>
-                  <button
-                    onClick={async () => {
-                      setError(null)
-                      try {
-                        const { runId: id } = await startRun(s.id)
-                        setRunId(id)
-                      } catch (err) {
-                        setError(err instanceof Error ? err.message : String(err))
-                      }
-                    }}
-                    className="rounded bg-almond-silk px-3 py-1.5 text-sm font-medium text-space-indigo"
-                  >
-                    Run search
-                  </button>
-                </div>
-                {s.criteriaText && (
-                  <p className="mt-2 text-sm text-lilac-ash/80">{s.criteriaText}</p>
-                )}
-              </li>
-            ))}
+                  {s.criteriaText && (
+                    <p className="mt-2 text-sm text-lilac-ash/80">{s.criteriaText}</p>
+                  )}
+                  <p className="mt-2 text-sm">
+                    {requirements ? (
+                      <span className="text-lilac-ash/80">Pre-filter: {requirements}</span>
+                    ) : (
+                      <span className="text-lilac-ash/50">
+                        No requirements set — nothing will be pre-filtered
+                      </span>
+                    )}
+                  </p>
+                </li>
+              )
+            })}
           </ul>
         )}
       </section>
 
-      {runId !== null && <RunView runId={runId} onClose={() => setRunId(null)} />}
+      {activeRun !== null && (
+        <RunView
+          runId={activeRun.id}
+          spec={activeRun.spec}
+          onClose={() => setActiveRun(null)}
+        />
+      )}
     </main>
   )
 }

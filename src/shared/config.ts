@@ -8,6 +8,14 @@ export interface RunSettings {
   maxMinutes: number
   /** How many listings to send to JEV in one request. */
   batchSize: number
+  /**
+   * How many listing pages one run may open, on top of the search pages.
+   *
+   * Every visit is another page load, and eBay starts refusing after roughly 50
+   * in a day, so this is a politeness cap as much as a time one. Survivors past
+   * the cap are still judged — on their card data alone.
+   */
+  maxDetailVisits: number
   /** Visible browser by default: a broken selector is visible, not silent. */
   headed: boolean
   /** US ZIP used to get domestic shipping costs. */
@@ -21,6 +29,7 @@ export const DEFAULTS: RunSettings = {
   maxPages: 25,
   maxMinutes: 10,
   batchSize: 10,
+  maxDetailVisits: 20,
   headed: true,
   zhomeZip: '10001',
   pacingMinMs: 1500,
