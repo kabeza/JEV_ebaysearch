@@ -102,6 +102,12 @@ export function ReportTable({ report, settings, onSort, onToggleDiscarded }: Pro
                     {row.listing.title}
                   </a>
                   {row.highlighted && <span className="ml-2 text-xs text-almond-silk">best</span>}
+                  {/* Why a row is not matching, on the row itself: a gate reject
+                      and a threshold miss look identical otherwise, and the
+                      discarded toggle exists to tell them apart. */}
+                  {!row.matching && row.discardReason && (
+                    <span className="block text-xs text-lilac-ash/60">{row.discardReason}</span>
+                  )}
                   {/* No "sponsored" badge: the marker eBay leaves in the DOM is
                       present on every card, so it carries no signal yet. */}
                 </td>

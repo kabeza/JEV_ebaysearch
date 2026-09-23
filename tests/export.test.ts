@@ -47,6 +47,7 @@ function row(over: Partial<ReportRow> = {}): ReportRow {
     highlighted: true,
     missing: [],
     trust: { raw: '100% positive (19K)', pct: 100, count: 19000, tier: 'trusted' },
+    discardReason: null,
     ...over,
   }
 }

@@ -305,3 +305,29 @@ describe('judgeSurvivors', () => {
     expect(listQuestionnaires(db, run.id)).toHaveLength(0)
   })
 })
+
+describe('judgeSurvivors and failed detail pages', () => {
+  it('judges a listing whose detail page failed, on its card data', async () => {
+    // run.ts and CLAUDE.md rule 17 both say a `detail_failed` listing still
+    // reaches JEV on its card data. It has to: nothing else ever will, so the
+    // report would otherwise list it as "not judged yet" on a finished run and
+    // wait for a judgment that never comes.
+    const { db, run } = setup(2)
+    const [first] = listListings(db, run.id)
+    db.prepare("update listings set stage = 'detail_failed' where id = ?").run(first!.id)
+
+    const outcome = await judgeSurvivors({
+      db,
+      runId: run.id,
+      request,
+      client: answeringClient(),
+      batchSize: 10,
+      emit: () => {},
+    })
+
+    expect(outcome.judged).toBe(2)
+    const failed = listListings(db, run.id).find((l) => l.id === first!.id)
+    expect(failed?.stage).toBe('judged')
+    expect(listJudgments(db, run.id).filter((j) => j.listingId === first!.id)).toHaveLength(6)
+  })
+})

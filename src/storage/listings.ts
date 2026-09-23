@@ -148,6 +148,25 @@ export function listSurvivors(db: SqliteDatabase, runId: number, limit?: number)
   return rows.map(toListing)
 }
 
+/**
+ * Every listing the judging phase must ask about: the survivors and the ones
+ * whose detail page would not read.
+ *
+ * A `detail_failed` listing is judged on its card data — `run.ts` says so and
+ * CLAUDE.md rule 17 says so — and nothing else will ever judge it, so leaving it
+ * out means a finished run carries a listing that waits forever for an answer it
+ * will never get. Separate from `listSurvivors` because the detail phase must
+ * not re-open a page that already failed.
+ */
+export function listToJudge(db: SqliteDatabase, runId: number): StoredListing[] {
+  const rows = db
+    .prepare(
+      "select * from listings where run_id = ? and stage in ('survivor', 'detail_failed') order by id",
+    )
+    .all(runId) as Row[]
+  return rows.map(toListing)
+}
+
 /** Records a pre-filter verdict on a listing. */
 export function updateListingStage(
   db: SqliteDatabase,

@@ -1,5 +1,5 @@
 import type { Database as SqliteDatabase } from 'better-sqlite3'
-import { listSurvivors, updateListingStage, type StoredListing } from '../storage/listings'
+import { listToJudge, updateListingStage, type StoredListing } from '../storage/listings'
 import { saveJudgments, saveQuestionnaire } from '../storage/judgments'
 import { chunk, halve, isTooLargeError } from '../jev/batch'
 import {
@@ -59,7 +59,9 @@ function toQuestionListing(listing: StoredListing, index: number): QuestionListi
 }
 
 export async function judgeSurvivors(o: JudgeOptions): Promise<JudgeOutcome> {
-  const survivors = listSurvivors(o.db, o.runId)
+  // Survivors *and* listings whose detail page failed: both are judged, the
+  // second on card data alone (run.ts, CLAUDE.md rule 17).
+  const survivors = listToJudge(o.db, o.runId)
   const outcome: JudgeOutcome = {
     judged: 0,
     batches: 0,

@@ -174,7 +174,12 @@ These were established by probing the live site. Do not replace them with assump
     does not invent specifics. One call per `batchSize` (default 10) listings; a `422` halves the
     batch *permanently for the run* (a size refused once will be refused again) down to 1, and a
     listing still refused fails the run loudly. Cost is a fraction of a cent: two listings with
-    twelve questions measured 3,632 input tokens, $0.00015.
+    twelve questions measured 3,632 input tokens, $0.00015. **The judge phase selects through
+    `listToJudge` (`stage in ('survivor', 'detail_failed')`), not `listSurvivors`.** Selecting only
+    `'survivor'` looks harmless and strands every failed-page listing as unjudged forever — nothing
+    else ever comes back for it, so a finished run shows it as still waiting. It took a review of
+    Stage 6 to surface, because the report was the first thing to display "not judged yet" and make
+    the wait visible.
 
 ## Conventions
 

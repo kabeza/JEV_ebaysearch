@@ -1734,10 +1734,22 @@ two-listing, twelve-question call: $0.00015.
 
 ## Stage 6 — report and controls (complete 2026-09-23)
 
-**Acceptance, as written above, is met.** 255 tests passing (211 before the stage, 44 added),
-typecheck clean on both projects. The task list this was built from is
+**Acceptance, as written above, is met.** 261 tests passing (211 before the stage), typecheck clean on
+both projects. The task list this was built from is
 `docs/superpowers/plans/2026-09-23-stage6-report-plan.md`; its design is
 `docs/superpowers/specs/2026-09-23-stage6-report-design.md`.
+
+**A fresh-context review found one critical and four important defects, all fixed with tests.** The
+critical one: an unjudged row was given a blend computed from the two signals that exist before the
+judging phase runs — shipping and the seller record — so mid-run, ten listings nobody had judged sat
+at 0.996–1.000, above every judged row. A row with no answers now has no blend. The important ones:
+a discarded row never said *why* it was discarded (a gate reject and a threshold miss looked
+identical); min-max rescaling of seller feedback was defeated by real `0% positive (0)` rows and left
+every real seller inside 0.961–1.000, so it is now a rank within the run; and **`detail_failed`
+listings were never judged at all**, because the judging phase selected `stage = 'survivor'` while
+`run.ts` and rule 17 both promise they are judged on card data — the first thing that made it visible
+was the report showing "not judged yet" on a finished run. Seven minor findings were deferred and are
+listed in the ledger.
 
 **What was built**
 

@@ -76,16 +76,25 @@ zero cost, and it must outrank the cheapest paid row rather than tie with it. Wh
 costs the same there is no information in the signal, so every row gets the middle and the blend is
 not quietly told something false.
 
-**Seller feedback**, rescaled to the range present in the run, not used raw. Raw percentages are
-compressed into 97–100% — 539 stored samples span `97.1% … 100%` — so raw would give every seller
-almost the same value and a slider over it would move nothing. Rescaled, the best seller in the run
-is 1.0 and the worst is 0.0, and the slider moves real listings.
+**Seller feedback**, ranked within the run, not used raw. Raw percentages are compressed into
+97–100% — 539 stored samples span `97.1% … 100%` — so raw would give every seller almost the same
+value and a slider over it would move nothing. The first draft of this section rescaled between the
+run's minimum and maximum instead, and **real data broke that**: 13 stored listings carry
+`0% positive (0)`, which set the floor at 0 and squeezed all 17 real sellers in run 8 into
+0.961–1.000 — a spread of 0.039, so the weight moved almost nothing, the exact failure the rescale
+was introduced to prevent.
 
 ```
-(pct - minPct) / (maxPct - minPct)   over rows whose feedback parsed
-no spread                            -> 0.5
-unparseable / absent                 -> null, treated as a missing answer
+rank of pct among the run's parseable percentages, ties sharing the average index
+  best present -> 1.0, worst -> 0.0
+fewer than two records, or a pct not in the run's own set -> 0.5
+unparseable / absent                                     -> null, a missing answer
 ```
+
+A rank cannot be dragged by an outlier, and "better than the other sellers in this run" is what the
+report ranks on. What it gives up is proportionality: a seller two points above another scores the
+same as one half a point above it. The absolute percentage is still printed in the row, so the
+reader who wants the ratio has it.
 
 ### 3.3 The signals
 
@@ -162,7 +171,14 @@ Two behaviours the table owes the reader:
   and this project has already learned that a wrong reject that leaves no trace is unrecoverable.
 - **Rows with no judgments yet** — a run still in flight, or a survivor whose batch has not returned
   — show their card data and say `not judged yet`, with no blend and no rank. Sorting by blend puts
-  them last rather than at 0, which would be a rank the data does not support.
+  them last rather than at 0, which would be a rank the data does not support. **They have no blend
+  at all, not a blend over the signals that happen to exist yet:** shipping and a seller record
+  alone blended to 0.99 in run 8's first batch and put ten unjudged listings above every judged one,
+  which was the first critical finding of the review.
+- **A discarded row says why it was discarded**, in the row: `failed the is_target_product gate:
+  0.02 below 0.50`, `below the match threshold: 0.588 below 0.60`, or `no weighted answers to
+  blend`. Without it a gate reject and a threshold miss are indistinguishable, and the toggle exists
+  so the reader can tell which reject is absolute and which one their own thresholds caused.
 
 Empty states are stated, never implied: no survivors, no judgments, and no discarded rows each get
 an explicit line of text (CLAUDE.md rule 7 — silence is a bug, at the UI layer too).

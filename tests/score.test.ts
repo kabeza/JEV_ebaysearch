@@ -3,7 +3,7 @@ import {
   DEFAULT_SETTINGS,
   PAID_SHIPPING_CEILING,
   buildReport,
-  feedbackScore,
+  feedbackRank,
   normaliseAnswer,
   scaleOf,
   shippingScore,
@@ -74,20 +74,30 @@ describe('shippingScore', () => {
   })
 })
 
-describe('feedbackScore', () => {
-  it('rescales to the run, not to the raw percentage', () => {
-    const scale = scaleOf([97.1, 99.8, 100])
-    expect(feedbackScore(100, scale)).toBeCloseTo(1)
-    expect(feedbackScore(97.1, scale)).toBeCloseTo(0)
-    expect(feedbackScore(99.8, scale)).toBeCloseTo((99.8 - 97.1) / (100 - 97.1))
+describe('feedbackRank', () => {
+  it('ranks the run, so a junk record at the bottom cannot compress the rest', () => {
+    // Found on real data: 13 stored rows carry `0% positive (0)`, and with a
+    // min-max rescale that single outlier left every real seller inside
+    // 0.961–1.000 — a weight over it moved almost nothing, which is the exact
+    // failure the rescale was introduced to fix.
+    const values = [0, 97.1, 99.8, 100]
+    expect(feedbackRank(97.1, values)).toBeCloseTo(1 / 3)
+    expect(feedbackRank(99.8, values)).toBeCloseTo(2 / 3)
+    expect(feedbackRank(100, values)).toBeCloseTo(1)
+    expect(feedbackRank(0, values)).toBe(0)
   })
 
-  it('is neutral when every seller is the same', () => {
-    expect(feedbackScore(100, scaleOf([100, 100]))).toBe(0.5)
+  it('gives a tied group the same rank rather than an arbitrary order', () => {
+    expect(feedbackRank(100, [97.1, 100, 100])).toBeCloseTo(1.5 / 2)
+  })
+
+  it('is neutral when there is nothing to compare against', () => {
+    expect(feedbackRank(100, [100])).toBe(0.5)
+    expect(feedbackRank(100, [])).toBe(0.5)
   })
 
   it('is null for a seller with no parseable record', () => {
-    expect(feedbackScore(null, scaleOf([97.1, 100]))).toBeNull()
+    expect(feedbackRank(null, [97.1, 100])).toBeNull()
   })
 })
 
@@ -307,5 +317,47 @@ describe('buildReport derived signals', () => {
     const byId = new Map(report.matching.map((r) => [r.listing.id, r]))
     expect(byId.get(1)!.values.seller_feedback).toBeNull()
     expect(byId.get(1)!.missing).toContain('seller_feedback')
+  })
+})
+
+describe('buildReport discard reasons and unjudged rows', () => {
+  it('gives a row that has not been judged no blend at all', () => {
+    // Mid-run the first batch is judged while later survivors are not. Those rows
+    // have shipping and a seller, so a blend computed from those alone reads
+    // 0.99+ and sorts above every judged listing — a rank the data cannot support.
+    const report = buildReport([listing({ id: 9, shipping: 0 })], [], settings())
+    expect(report.pending).toHaveLength(1)
+    expect(report.pending[0]!.blend).toBeNull()
+  })
+
+  it('says which gate a discarded row failed, and by how much', () => {
+    const report = buildReport(
+      [listing({ id: 1 })],
+      judged(1, { is_target_product: NOUL(0.02) }),
+      settings(),
+    )
+    expect(report.discarded[0]!.discardReason).toBe(
+      'failed the is_target_product gate: 0.02 below 0.50',
+    )
+  })
+
+  it('says when a discarded row missed the match threshold instead', () => {
+    const report = buildReport(
+      [listing({ id: 1 })],
+      judged(1, { spec_match: NOUL(0.2), criteria_freeform: NOUL(0.2) }),
+      settings({ matchThreshold: 0.6 }),
+    )
+    const reason = report.discarded[0]!.discardReason ?? ''
+    expect(reason).toMatch(/^below the match threshold: 0\.\d{3} below 0\.60$/)
+  })
+
+  it('says so when a row has no weighted answers to blend', () => {
+    const zero = Object.fromEntries(
+      ['spec_match', 'price_value', 'listing_trust', 'criteria_freeform', 'seller_feedback', 'shipping'].map(
+        (k) => [k, 0],
+      ),
+    ) as Record<string, number>
+    const report = buildReport([listing({ id: 1 })], judged(1), settings({ weights: zero as never }))
+    expect(report.matching[0]!.discardReason).toBeNull()
   })
 })

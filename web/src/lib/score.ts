@@ -80,15 +80,31 @@ export function shippingScore(shipping: number | null, scale: Scale | null): num
 }
 
 /**
- * Seller feedback rescaled to the run's own spread. Raw percentages sit in
- * 97–100% across 539 stored listings, so a slider over the raw value would move
- * nothing; rescaled, the best seller in the run is 1 and the worst is 0.
+ * Seller feedback as a rank within the run: the best seller present is 1, the
+ * worst is 0, and a tied group shares its rank.
+ *
+ * Ranked rather than rescaled between the run's minimum and maximum, because
+ * real data contains records that are not sellers at all: 13 stored listings
+ * carry `0% positive (0)`. Under a min-max rescale that one outlier set the
+ * floor and compressed every real seller into 0.961–1.000, so the weight moved
+ * almost nothing — the exact failure the rescale was introduced to avoid
+ * (spec §3.2). A rank cannot be dragged by an outlier, and "better than the
+ * other sellers in this run" is what the report is ranking on.
  */
-export function feedbackScore(pct: number | null, scale: Scale | null): number | null {
+export function feedbackRank(pct: number | null, values: number[]): number | null {
   if (pct === null) return null
-  if (!scale) return null
-  if (scale.max === scale.min) return 0.5
-  return clamp01((pct - scale.min) / (scale.max - scale.min))
+  if (values.length < 2) return 0.5
+  const sorted = [...values].sort((a, b) => a - b)
+  let first = -1
+  let last = -1
+  for (let i = 0; i < sorted.length; i++) {
+    if (sorted[i] !== pct) continue
+    if (first === -1) first = i
+    last = i
+  }
+  // A percentage that is not in the run's own set has no rank among it.
+  if (first === -1) return 0.5
+  return clamp01((first + last) / 2 / (sorted.length - 1))
 }
 
 export type SortColumn = 'blend' | 'price' | 'shipping' | 'title' | 'seller' | 'trust'
@@ -140,6 +156,14 @@ export interface ReportRow {
   highlighted: boolean
   missing: WeightedSignal[]
   trust: SellerTrust
+  /**
+   * Why this row is not in the matching list, in words, or null when it is.
+   *
+   * Without it a gate reject and a threshold miss look identical in the table,
+   * and the discarded toggle exists precisely so the reader can tell which
+   * reject is absolute and which one their own thresholds caused (spec §5).
+   */
+  discardReason: string | null
 }
 
 export interface Report {
@@ -162,29 +186,56 @@ function answersOf(judgments: Judgment[]): Map<number, Record<string, JevAnswer>
   return out
 }
 
+/**
+ * The seller feedback string for a listing: the card's, falling back to the
+ * listing page's. Both the run's scale and the row's value go through here, so
+ * the two can never be computed over different sets.
+ */
+function feedbackOf(listing: Listing): string | null {
+  return listing.sellerFeedback ?? listing.detail?.sellerFeedback ?? null
+}
+
 /** Everything a row needs that does not depend on the settings. */
 function signalsFor(
   listing: Listing,
   answers: Record<string, JevAnswer>,
   shippingScale: Scale | null,
-  feedbackScale: Scale | null,
+  feedbackValues: number[],
 ): { gates: Record<GateSignal, number | null>; values: Record<WeightedSignal, number | null> } {
   const gates = {} as Record<GateSignal, number | null>
   for (const signal of GATE_SIGNALS) gates[signal] = normaliseAnswer(answers[signal])
 
-  const parsed = parseSellerFeedback(
-    listing.sellerFeedback ?? listing.detail?.sellerFeedback ?? null,
-  )
+  const parsed = parseSellerFeedback(feedbackOf(listing))
   const values = {
     spec_match: normaliseAnswer(answers.spec_match),
     price_value: normaliseAnswer(answers.price_value),
     listing_trust: normaliseAnswer(answers.listing_trust),
     criteria_freeform: normaliseAnswer(answers.criteria_freeform),
-    seller_feedback: feedbackScore(parsed?.pct ?? null, feedbackScale),
+    seller_feedback: feedbackRank(parsed?.pct ?? null, feedbackValues),
     shipping: shippingScore(listing.shipping, shippingScale),
   } as Record<WeightedSignal, number | null>
 
   return { gates, values }
+}
+
+/** Why a judged row is not matching — in the reader's words, not a code. */
+function reasonFor(
+  gates: Record<GateSignal, number | null>,
+  blend: number | null,
+  settings: ReportSettings,
+): string | null {
+  for (const signal of GATE_SIGNALS) {
+    const value = gates[signal]
+    if (value === null) return `failed the ${signal} gate: no answer`
+    if (value < settings.gates[signal]) {
+      return `failed the ${signal} gate: ${value.toFixed(2)} below ${settings.gates[signal].toFixed(2)}`
+    }
+  }
+  if (blend === null) return 'no weighted answers to blend'
+  if (blend < settings.matchThreshold) {
+    return `below the match threshold: ${blend.toFixed(3)} below ${settings.matchThreshold.toFixed(2)}`
+  }
+  return null
 }
 
 /**
@@ -252,20 +303,22 @@ export function buildReport(
   const shippingScale = scaleOf(
     listings.map((l) => l.shipping).filter((s): s is number => typeof s === 'number'),
   )
-  const feedbackScale = scaleOf(
-    listings
-      .map((l) => parseSellerFeedback(l.sellerFeedback ?? null)?.pct)
-      .filter((p): p is number => typeof p === 'number'),
-  )
+  const feedbackValues = listings
+    .map((l) => parseSellerFeedback(feedbackOf(l))?.pct)
+    .filter((p): p is number => typeof p === 'number')
 
   const rows: ReportRow[] = listings.map((listing) => {
     const answers = byListing.get(listing.id) ?? {}
-    const { gates, values } = signalsFor(listing, answers, shippingScale, feedbackScale)
+    const judged = Object.keys(answers).length > 0
+    const { gates, values } = signalsFor(listing, answers, shippingScale, feedbackValues)
     const missing = WEIGHTED_SIGNALS.filter((signal) => values[signal] === null)
     const passesGates = GATE_SIGNALS.every(
       (signal) => gates[signal] !== null && gates[signal]! >= settings.gates[signal],
     )
-    const blend = blendOf(values, settings.weights)
+    // A row nobody has judged has no blend: the signals left over (shipping, a
+    // seller) would otherwise blend to 0.99 and outrank every judged listing on
+    // the strength of two signals the questions have not spoken to yet.
+    const blend = judged ? blendOf(values, settings.weights) : null
     // A row with no blend at all is neither matched nor discarded. Sending it to
     // the discarded list would hide it behind a counter for a reason the user
     // never chose, so it stays visible, unranked and last (see `compare`).
@@ -280,7 +333,8 @@ export function buildReport(
       matching,
       highlighted: matching && blend !== null && blend >= settings.highlightThreshold,
       missing,
-      trust: sellerTrust(listing.sellerFeedback ?? listing.detail?.sellerFeedback ?? null),
+      trust: sellerTrust(feedbackOf(listing)),
+      discardReason: judged && !matching ? reasonFor(gates, blend, settings) : null,
     }
   })
 
