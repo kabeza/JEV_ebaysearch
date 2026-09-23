@@ -1691,33 +1691,169 @@ field, and the `Condition` row is a paragraph of boilerplate. Both are dropped r
 - `scripts/recon-listing.ts` — probe one listing page; `scripts/build-listing-fixture.ts` —
   rebuild the fixture from a fresh capture when eBay changes its layout.
 
-## Handoff — state at end of 2026-09-21
+## Stage 5 — JEV judgments (complete 2026-09-21)
 
-**Working and verified:** Stages 0–4 complete.
+**Acceptance, as written above, is met.** 211 tests passing, typecheck clean on both projects.
 
-- 173 tests passing, `tsc --noEmit` clean on both the server and web projects.
+**What was built**
+
+- `src/jev/questions.ts` — `buildQuestions` / `buildState` / `DEFAULT_ACCEPTED_CONDITIONS`. Built
+  with the SDK's `noul()` and `score()` helpers, so the question types come from the SDK and a
+  change in what JEV accepts breaks the build. Six questions per listing, keys prefixed by a
+  per-listing label (`L3.spec_match`), every question naming its listing in its own text.
+- `src/jev/batch.ts` — `chunk`, `halve`, `isTooLargeError`.
+- `src/pipeline/judge.ts` — `judgeSurvivors`, run as a phase of the run after the detail phase.
+  Stores a questionnaire per run, then judgments; publishes `judgments.received` per batch; adds
+  `judged`, `jevInputTokens`, `costUsd`, `judgmentsMissing` to run stats.
+- `src/storage/judgments.ts` — `saveQuestionnaire`, `saveJudgments`, `listJudgments`. Answers are
+  stored whole (value, probabilities, confidence, legend) so Stage 6 needs no new calls.
+- `GET /api/runs/:id` now returns `judgments` alongside `listings`; `RunView` renders them in the
+  expanded row with the score's nearest legend level, its confidence, and a "near the fence" marker.
+- The server and runner take a `judgeClientFactory`, mirroring `sourceFactory`, so a whole run can
+  be exercised without an API key.
+
+**Verified with real money before building around them (the phase-1 probe).** Six real listings,
+one call: `is_target_product` correctly rejected a touchpad (0.020) and a bare screen panel (0.020)
+and accepted real laptops (0.94–0.98); `spec_match` and `criteria_freeform` tracked real requirement
+satisfaction, jumping from 0.04 to 0.97 for the one listing that met every requirement. Cost of a
+two-listing, twelve-question call: $0.00015.
+
+**Findings that changed the code**
+
+- `score` is **not** an index into the legend. It is a probability-weighted value on that scale
+  (`2.18` of 4) with its own `confidence`. Anything blending noul (0…1) and score (0…n-1) must
+  normalise first — recorded in `CLAUDE.md` rule 12 for Stage 6.
+- Question keys are invisible to the model, so an unnamed question is a question about all ten
+  listings at once. Hence the `L1…Ln` labels and the "About listing L3 — …" prefix on every text.
+- `SearchRequest` (what the buyer asked for) was renamed from `JevRequest` to stop colliding with
+  the client's `JevRequest` (state + questions). Two meanings for one name cost a typecheck cycle.
+- A `422` halves the batch **permanently for the run**, not per batch: a size the API refused once
+  will be refused again, and re-trying it spends calls to learn nothing.
+- The noul questions gained `criteria: { true, false }` outcome descriptions, which the SDK supports
+  and the probe had not used. They are additive anchors for the probability, not a rewrite.
+
+## Stage 6 — report and controls (complete 2026-09-23)
+
+**Acceptance, as written above, is met.** 255 tests passing (211 before the stage, 44 added),
+typecheck clean on both projects. The task list this was built from is
+`docs/superpowers/plans/2026-09-23-stage6-report-plan.md`; its design is
+`docs/superpowers/specs/2026-09-23-stage6-report-design.md`.
+
+**What was built**
+
+- `web/src/lib/score.ts` — the composition. `normaliseAnswer` divides a score by its own legend
+  length (rule 12), `shippingScore` inverts absolute dollars with free at 1.0 and paid capped at
+  0.9, `feedbackScore` rescales the run's spread, `blendOf` drops missing signals and renormalises,
+  and `buildReport` sorts every survivor into matching / pending / discarded with counts.
+- `web/src/lib/sellerTrust.ts` — parses `"99.8% positive (19K)"` and classifies the three tiers.
+- `web/src/lib/export.ts` — CSV (resolved answers) and JSON (raw answers, legend and probabilities
+  intact), both carrying every URL, downloaded client-side with no endpoint.
+- `WeightControls.tsx`, `ReportTable.tsx`, `SellerBadge.tsx`, `AnswerDetail.tsx` — the controls, the
+  ranked table, the badges, and the answer panels moved out of `RunView.tsx` unchanged so the live
+  feed and a report row cannot drift apart.
+- `RunView.tsx` keeps SSE, the event feed and the rejected-listings audit trail; its table is now the
+  report, ranked by blend, with export buttons in the header.
+- `scripts/repro-live-ui.ts` gained a request counter and a slider driver.
+
+**Verified in the browser, because this claim cannot be tested without one.** Moving
+`weight spec_match` to 0 sends the slider readout to 0.0, moves the first row's blend from 0.798 to
+0.775 — and produces **0 network requests**, as does a gate change. That is the stage's acceptance
+criterion, measured where it is claimed.
+
+**Two things the work found, both recorded in the ledger**
+
+- The first request counter was a false positive: it set `input.value` directly, React's value
+  tracker saw no change, onChange never ran, and "0 requests" was measured on a slider that never
+  moved. Setting through the native value setter is what makes the number mean anything.
+- The trust cell printed `100% 100% · 81` — the row's percentage plus the badge repeating it.
+- On real data (run 8, 20 judged survivors) the defaults give **1 matching / 19 discarded**: an ASUS
+  VivoBook with no parseable seller feedback tops the list at 0.726, above every real ThinkPad. A
+  listing with *fewer* signals is easier to score high once the weights renormalise. The spec's rule
+  ("missing is excluded, not penalised") produces that deliberately, but the consequence was never
+  stated, and the defaults are a separate question the owner now has the controls to answer.
+
+## First real run — judged end to end (2026-09-23)
+
+**Run 8, search 6, `batchSize: 10`, `maxPages: 2`, `maxDetailVisits: 20`.** The first run since
+Stage 4 to scrape eBay *and* judge its listings, and the measurement the handoff was waiting for.
+
+| | |
+|---|---|
+| Pages / cards | 2 pages, 85 cards, 85 stored |
+| Pre-filter | 65 rejected, 20 survivors |
+| Detail phase | 20 visits, 0 failures (the cap, not the total) |
+| Judging | 20 judged, 120 judgments, **0 missing answers**, 2 batches |
+| Cost | $0.00238 (56,640 input tokens) |
+| Wall clock | 113 s |
+| eBay page loads | 22 |
+
+**Live delivery worked.** SSE was followed as it streamed: `page.fetched`, `cards.extracted`,
+`cards.filtered`, `listing.visited` and `judgments.received` all arrived *during* the run, not only
+in the replay afterwards. Rule 13's stale-process trap did not bite.
+
+**The answers discriminate, which is the thing that matters.** Across 20 listings:
+`is_target_product` split 10 / 10 (accessories and parts survive the pre-filter — that is what the
+question is for); `condition_ok` rejected exactly one; `spec_match` accepted one (0.92) and put the
+other 19 at 0.02–0.09; `criteria_freeform` never exceeded 0.63. Score answers spread across their
+range: `listing_trust` 0.02–3.33, `price_value` 1.37–3.40.
+
+**What bounds batch size — measured, and not what rule 11 assumed.**
+`scripts/probe-batch-size.ts` re-judged the same stored listings at several sizes, no eBay involved,
+$0.0055 total:
+
+| Shape | n=1 | n=5 | n=10 | n=20 |
+|---|---|---|---|---|
+| state + 1 question | 1,655 | 3,744 | 5,356 | 8,267 |
+| state + the six real questions | 4,535 | 19,248 | 32,047 | 56,186 |
+
+`state` costs **~291 tokens per listing** — the 32k state limit would allow ~109 listings. The full
+request costs **~2,414–2,809 per listing**, because each of the six questions repeats the listing's
+facts paragraph that the state already carries (47,919 of the 56,186 tokens at n=20 are question
+text). So the 64k context is the binding limit, a batch of 20 already sits at 88% of it, and
+`batchSize: 10` was never the problem — the duplicated facts are.
+
+**Two things this run exposed, neither fixed yet:**
+
+1. **The facts duplication is removable and worth ~3x.** Stating the facts once (in the state) and
+   having each question refer to the listing by label is what `questions.ts`'s comment already
+   claims it does. Changing it changes what the model sees, so it needs its own before/after probe
+   on the same listings before it is believed.
+2. **Every stored search has `spec: {}`.** Nothing populates it — no UI form, and the API accepts
+   whatever it is given. The run above used a search created by hand with a real spec
+   (`ram_gb`, `storage_gb`, `cpu_family`, `touch`, `max_price`). With an empty spec the
+   `spec_match` question asks about "no particular specification" and leans entirely on the verbatim
+   criteria text.
+
+## Handoff — state at end of 2026-09-21 (updated 2026-09-23)
+
+**Working and verified:** Stages 0–6 complete.
+
+- 255 tests passing, `tsc --noEmit` clean on both the server and web projects.
 - Live scraping verified repeatedly; three runs on 2026-09-21 (60 listings each).
+- **A full run with judging enabled completed against eBay on 2026-09-23 (run 8)** — the first
+  since Stage 4. See "First real run" above for its numbers and the two things it exposed.
+- JEV verified against the real API twice: the phase-1 question probe, and a final call through the
+  shipped `buildQuestions`/`buildState` path after the SDK-helper refactor.
 - The live-table bug reported on 2026-09-18 **does not reproduce** — see `CLAUDE.md` rule 13 for the
   likeliest cause and `tests/server-events-stream.test.ts` for the new guard.
 - A browser-level repro that needs no eBay: `node --import tsx scripts/repro-live-ui.ts` (start
   `npm run dev:web` first). It drives the real UI with a real Playwright page over the captured
-  fixtures, prints which `EventSource` listeners fired, and shows a survivor's detail panel. It has
-  already caught one real defect that no unit test could.
+  fixtures and a fake JEV client, prints which `EventSource` listeners fired, and shows a survivor's
+  answers and item specifics. It has already caught two defects no unit test could.
 
 **Unfinished — pick up here next session:**
 
-1. **The sponsored marker is still a known defect.** `.s-card__sep b` is present on every card, so
+1. **Stage 6 (report and controls) is complete** — see its section above. **Next is Stage 7**
+   (persistence, re-open, re-judge): a stored run can be reopened and re-weighted today, but the
+   questions cannot be edited and re-asked without scraping again, which is what Stage 7 adds.
+
+2. **The sponsored marker is still a known defect.** `.s-card__sep b` is present on every card, so
    it carries no signal — a live run flagged 113 of 113. The field is retained as a raw observation
    but is deliberately not displayed. Find the real discriminator before surfacing it.
 
-2. **Stage 5 (JEV judgments) is next.** Everything it needs is now stored: `stage: 'survivor'`
-   selects the listings, and `detail.specifics` carries the item specifics to reason over. The
-   six questions are sketched in spec §5.5 and the questionnaire table; batching rules are in
-   spec §8 (one call, ~12x cheaper than separate calls) with `batchSize` from `DEFAULTS`.
-
-3. **Only one listing page has ever been parsed.** The fixture is a single item; labels vary
-   between listings, so a second capture from a different seller would harden the label handling
-   before Stage 5 depends on it.
+3. **The real end-to-end run happened on 2026-09-23 — see "First real run" below.** It answered the
+   prompt-size question in the opposite direction to the guess: the limit is reached from the
+   *questions*, not the state, and `batchSize: 10` is not far below the ceiling — `20` is.
 
 4. **eBay rate-limits by volume.** After roughly 50 page loads in a day, a run returned HTTP 403
    with the standard error page. Detail visits spend the same budget — hence `maxDetailVisits`.

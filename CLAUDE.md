@@ -17,14 +17,17 @@ it sits near 0.5, edit the questions, and re-judge the same listings without scr
 ## Commands
 
 ```bash
-npm test                  # vitest, 75 tests
+npm test                  # vitest, 211 tests
 npm run typecheck         # tsc on BOTH the server and web projects
 npm run dev:server        # API on 127.0.0.1:3001 (needs .env)
 npm run dev:web           # Vite page on 127.0.0.1:5173
 npm run dev               # both
 npm run spike:jev         # Stage 0: one real JEV call, prints answers + cost
 node --import tsx scripts/recon-ebay.ts       # fetch eBay, dump HTML + screenshot + selectors
+node --import tsx scripts/recon-listing.ts    # probe one listing page (Stage 4 selectors)
+node --import tsx scripts/build-listing-fixture.ts  # rebuild a listing fixture from a capture
 node --import tsx scripts/probe-access.ts     # the headless-vs-headed access matrix
+node --import tsx scripts/repro-live-ui.ts    # drive the real UI with no eBay (start dev:web first)
 ```
 
 `.env` must contain `TYPESAFE_API_KEY`. It is gitignored — keep it that way.
@@ -102,8 +105,18 @@ These were established by probing the live site. Do not replace them with assump
 
 11. **JEV is stateless.** It answers questions, it does not remember your search and it cannot write
     questions. Bundle independent questions into **one** call — TypeSafe measure this at ~12x
-    cheaper and 10x faster. Hard limits: 64k context, **32k for `state`**, which is what bounds
-    batch size. Pricing is $0.042/Mtok input, output free.
+    cheaper and 10x faster. Hard limits: 64k context, 32k for `state`. Pricing is $0.042/Mtok
+    input, output free.
+
+11b. **What actually bounds batch size is the question text, not the state.** Measured on
+    2026-09-23 with `scripts/probe-batch-size.ts` against 20 stored judged listings: `state` costs
+    **~291 tokens per listing**, so the 32k state limit would allow ~109 listings. The full request
+    (state + six questions) costs **~2,414–2,809 tokens per listing**, because `buildQuestions`
+    writes the listing's facts paragraph into *each* of the six questions even though `buildState`
+    already carries the same facts. So the 64k context binds long before the 32k state: a batch of
+    10 measured 32,047 input tokens and a batch of 20 measured 56,186 — 88% of the context. The
+    duplication is the cost driver and it is removable; the state never was. Re-measure with the
+    probe after any change to the questions.
 
 12. **`legend` and `probabilities` on a score answer are keyed by STRING index** (`"0"`, `"1"`…),
     not integers. Assuming numbers renders blank cells. And **`score` is not that index** — it is a
@@ -111,6 +124,14 @@ These were established by probing the live site. Do not replace them with assump
     with `confidence: 0.27` and probabilities `{"0":0.04,"1":0.27,…}`. So a score answer lives on
     0…n-1 (n-1 high) while a noul answer lives on 0…1, and anything that blends them must normalise
     first. Verified against `jev-1.13.0` on 2026-09-21.
+
+12b. **A noul answer carries no confidence and no probabilities** — it is stored as
+    `{ type: 'noul', noul: 0.98 }`, while a score answer carries `score`, `confidence`,
+    `legend`, `probabilities`. So a "near the fence" marker for a noul has to be its own distance
+    from 0.5. And `confidence` is not that distance for a score: a real run (2026-09-23) produced
+    `price_value` at `score: 2.48` with `confidence: 0` and probabilities spread over 0/3/4, next to
+    a `listing_trust` at `3.32` with `confidence: 0.52` and a similar spread. Do not treat
+    `confidence` as a fence measure without checking it against real answers first.
 
 13. **The dev server does NOT hot-reload.** `tsx` runs the source once; editing anything under
     `src/` has no effect until `dev:server` is restarted. A stale process keeps writing events to
@@ -126,6 +147,8 @@ These were established by probing the live site. Do not replace them with assump
     escaped only because that branch returns 0 first. Read attribute rows one at a time; never infer
     a field from a concatenation of rows.
 
+
+
 15. **A listing page states `N\A` and writes prose into value slots.** Item specifics is a `<dl>`
     of alternating `dt.ux-labels-values__labels` / `dd.ux-labels-values__values` (verified
     2026-09-21). Two of its values are not values: `N\A` is eBay's placeholder for a field it does
@@ -133,6 +156,25 @@ These were established by probing the live site. Do not replace them with assump
     definitions". Both are dropped or reduced to a vocabulary label — feeding them to JEV would be
     recording junk as fact. Labels vary per listing, so key the map by eBay's own label rather than
     assuming names like "RAM Size" exist.
+
+
+16. **A question key is invisible to the model.** JEV sees only each question's `instructions`
+    text, so a question that does not name its listing is asking about all of them at once. Every
+    question opens "About listing L3 — «title» at $1,299.99: …", and labels are assigned per run in
+    card order. Two consequences: the same facts are stated once and reused by all six questions
+    (inconsistent subsets invite inconsistent answers), and the buyer's criteria are quoted
+    verbatim, in quotes. `src/jev/questions.ts` owns this; build questions with the SDK's
+    `noul()`/`score()` helpers so a change in what JEV accepts breaks the build. Note the naming:
+    `SearchRequest` (what the buyer asked for) is deliberately not `JevRequest` (the state +
+    questions envelope in `client.ts`).
+
+17. **Judging is a phase of the run, after the detail phase.** Every survivor is judged, including
+    ones whose listing page failed (`detail_failed`) and ones past `maxDetailVisits` — those are
+    judged on card data alone, and the question text says no listing page was opened so the model
+    does not invent specifics. One call per `batchSize` (default 10) listings; a `422` halves the
+    batch *permanently for the run* (a size refused once will be refused again) down to 1, and a
+    listing still refused fails the run loudly. Cost is a fraction of a cent: two listings with
+    twelve questions measured 3,632 input tokens, $0.00015.
 
 ## Conventions
 
@@ -149,6 +191,15 @@ These were established by probing the live site. Do not replace them with assump
 - `git` is now in use. `.env` and `data/` are gitignored — **never commit `.env`.**
 
 ## Current state
+
+**Resume here (2026-09-21):** Stages 0–5 are complete. **Next is Stage 6, the report and controls.**
+The plan's *Handoff* section lists what is unfinished; the two items that matter most are that no
+real end-to-end run has happened since Stage 4 (so prompt sizes are unmeasured and `batchSize: 10`
+is probably far below the 32k limit), and that the sponsored marker is still a known defect.
+
+A run now judges as part of the run, so it needs `TYPESAFE_API_KEY`: the client is built before the
+first page load, so a missing key fails the run in the first second rather than after spending eBay
+page loads on listings it could never judge. A 28-survivor run costs roughly $0.0015.
 
 Stages 0–5 complete (Stage 5 = JEV judgments). 211 tests passing, typecheck clean.
 

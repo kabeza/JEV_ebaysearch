@@ -258,12 +258,82 @@ async function main() {
     )
   }
 
+  // The report orders rows by blend, so the first row is not necessarily one
+  // whose listing page was opened. Expand a row that has one: the expand
+  // button's title says which, which is why it is still there.
+  const withDetail = page.locator('table tbody tr button[title="Show item specifics"]').first()
+  if (await withDetail.count()) {
+    await withDetail.click()
+    await page.waitForTimeout(300)
+  }
   const specifics = await page
     .locator('table tbody tr td dl')
     .first()
     .innerText()
     .catch(() => '(no specifics panel)')
   console.log(`\nspecifics panel:\n${specifics.split('\n').slice(0, 8).join('\n')}`)
+
+  // The acceptance criterion that cannot be tested without a browser: moving a
+  // control re-sorts the table with zero network requests (spec §5.6).
+  const fetchCount = async () =>
+    page.evaluate(() =>
+      (window as never as { __log: unknown[][] }).__log.filter((e) => e[0] === 'fetch').length,
+    )
+  /**
+   * Drive a controlled range input the way a person does.
+   *
+   * Assigning `input.value` directly does NOT work: React keeps its own value
+   * tracker for the element, sees no change, and skips onChange — which
+   * produced a passing "0 requests" on a slider that never moved. The native
+   * setter goes around the tracker, and the input event then reaches React.
+   */
+  const setRange = (label: string, value: string) =>
+    page.evaluate(
+      ({ label, value }) => {
+        const input = document.querySelector(
+          `input[aria-label="${label}"]`,
+        ) as HTMLInputElement | null
+        if (!input) return false
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )?.set
+        setter?.call(input, value)
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      },
+      { label, value },
+    )
+
+  const before = await fetchCount()
+  const firstBefore = await page.locator('tbody tr >> nth=0').innerText()
+  const moved = await setRange('weight spec_match', '0')
+  await page.waitForTimeout(300)
+  const after = await fetchCount()
+  const firstAfter = await page.locator('tbody tr >> nth=0').innerText()
+  const gateMoved = await setRange('gate condition_ok', '0.95')
+  await page.waitForTimeout(300)
+  const afterGate = await fetchCount()
+
+  // Did React actually re-render? The slider's own readout answers it: if the
+  // number beside the slider still says 1.0, the change never reached the
+  // component, and the request count above proves nothing about re-sorting.
+  const readout = await page.evaluate(() => {
+    const input = document.querySelector(
+      'input[aria-label="weight spec_match"]',
+    ) as HTMLInputElement | null
+    return input ? { value: input.value, shown: input.nextElementSibling?.textContent ?? '' } : null
+  })
+
+  console.log(`\ncontrols: weight slider found=${moved} gate slider found=${gateMoved}`)
+  console.log(`weight spec_match now: ${JSON.stringify(readout)}`)
+  console.log(`requests during a weight change: ${after - before}`)
+  console.log(`requests during a gate change: ${afterGate - after}`)
+  // Print the tail of the row too: its title often survives a re-sort, and the
+  // cell that actually moved (the blend) is further along.
+  console.log(`first row changed by the weight: ${firstBefore !== firstAfter}`)
+  console.log(`first row before: ${JSON.stringify(firstBefore.slice(0, 60))} … ${JSON.stringify(firstBefore.slice(-60))}`)
+  console.log(`first row after:  ${JSON.stringify(firstAfter.slice(0, 60))} … ${JSON.stringify(firstAfter.slice(-60))}`)
 
   await browser.close()
   await scraperBrowser.close()
