@@ -92,6 +92,11 @@ export function finishRun(db: SqliteDatabase, id: number, o: FinishRunOptions): 
 }
 
 /** Records progress mid-run, so a re-attached page can show where the run is. */
+/** Moves a run to another status without finishing it: `paused`, and back. */
+export function updateRunStatus(db: SqliteDatabase, id: number, status: RunStatus): void {
+  db.prepare('update runs set status = ? where id = ?').run(status, id)
+}
+
 export function updateRunStats(db: SqliteDatabase, id: number, stats: RunStats): void {
   const existing = getRun(db, id)
   const merged = { ...(existing?.stats ?? {}), ...stats }

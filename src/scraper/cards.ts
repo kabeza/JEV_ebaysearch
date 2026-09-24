@@ -9,6 +9,19 @@ import type { Page } from 'playwright'
  * `CARD_QUERY` constant, so a layout change is a one-line fix.
  */
 
+/**
+ * How many result cards a saved eBay page yields, with no browser involved.
+ *
+ * A page whose markup moved to a different container must yield zero, which is
+ * what makes a captured fixture a regression test rather than a snapshot: the
+ * pair `srp-results.html` (whole) and `srp-broken.html` (the same page with the
+ * card class renamed) is the deliberate detector for "eBay changed its markup"
+ * (spec §13).
+ */
+export function cardCount(html: string): number {
+  return (html.match(/class="s-card[ "]/g) ?? []).length
+}
+
 export interface RawCard {
   itemId: string
   title: string

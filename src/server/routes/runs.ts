@@ -8,6 +8,7 @@ import {
   activeRunId,
   cancelRun,
   isRunning,
+  resumeRun,
   startRejudge,
   startRun,
   subscribe,
@@ -106,6 +107,17 @@ export function registerRunRoutes(
     } catch (err) {
       return reply.code(409).send({ error: err instanceof Error ? err.message : String(err) })
     }
+  })
+
+  /**
+   * Wakes a paused run so it retries the page or batch it stopped on. 409 rather
+   * than 200 when nothing was paused: a stray click must not look like it did
+   * something.
+   */
+  app.post('/api/runs/:id/resume', async (request, reply) => {
+    const id = Number((request.params as { id: string }).id)
+    const resumed = resumeRun(id)
+    return reply.code(resumed ? 200 : 409).send({ resumed, runId: id })
   })
 
   app.post('/api/runs/:id/cancel', async (request, reply) => {

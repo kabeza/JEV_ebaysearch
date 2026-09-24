@@ -1,7 +1,7 @@
 import type { Database as SqliteDatabase } from 'better-sqlite3'
 import { listToJudge, updateListingStage, type StoredListing } from '../storage/listings'
 import { nextQuestionnaireVersion, saveJudgments, saveQuestionnaire } from '../storage/judgments'
-import { chunk, halve, isTooLargeError } from '../jev/batch'
+import { chunk, halve, isOutageError, isTooLargeError } from '../jev/batch'
 import {
   buildQuestions,
   buildState,
@@ -15,6 +15,7 @@ import { defaultDraft } from '../jev/draft'
 import type { JevAnswer, JevClient } from '../jev/client'
 import { estimateCostUsd } from '../shared/config'
 import type { RunEventType } from '../storage/events'
+import type { PauseDetail } from './pause'
 
 /**
  * Asks JEV about every survivor, in batches, and stores every answer.
@@ -34,6 +35,11 @@ export interface JudgeOptions {
   batchSize: number
   emit: (type: RunEventType, payload: unknown) => void
   isCancelled?: () => boolean
+  /**
+   * How the run waits out an overloaded service (spec §11: pause and report).
+   * Absent, an exhausted outage fails the run as it always has.
+   */
+  pause?: (detail: PauseDetail) => Promise<void>
 }
 
 export interface JudgeOutcome {
@@ -75,6 +81,7 @@ export interface AskInBatchesOptions {
   batchSize: number
   emit: (type: RunEventType, payload: unknown) => void
   isCancelled?: () => boolean
+  pause?: (detail: PauseDetail) => Promise<void>
   /** The listings, already labelled in their run's order. */
   labelled: QuestionListing[]
   /** Database ids, in the same order as `labelled`. */
@@ -132,6 +139,24 @@ export async function askInBatches(o: AskInBatchesOptions): Promise<JudgeOutcome
           continue
         }
         const message = err instanceof Error ? err.message : String(err)
+
+        // An exhausted outage is a service problem a machine cannot fix by
+        // trying harder: wait for a person, then retry the same batch. A batch
+        // that is still overloaded pauses again, which is why there is no
+        // counter — either way it cannot progress without someone.
+        if (isOutageError(err) && o.pause) {
+          await o.pause({
+            reason: 'jev_outage',
+            batch: batchIndex + 1,
+            message: `JEV could not answer batch ${batchIndex + 1}: ${message}`,
+          })
+          if (o.isCancelled?.()) {
+            outcome.cancelled = true
+            return outcome
+          }
+          continue
+        }
+
         throw new Error(
           `A batch of ${size} listing${size === 1 ? '' : 's'} could not be judged: ${message}`,
         )
@@ -213,6 +238,7 @@ export async function judgeSurvivors(o: JudgeOptions): Promise<JudgeOutcome> {
     labelled: survivors.map(toQuestionListing),
     listingIds: survivors.map((l) => l.id),
     questionKeys: QUESTION_KEYS,
+    pause: o.pause,
     questionsFor: (batch) => ({
       state: buildState(o.request, batch),
       questions: buildQuestions(o.request, batch),

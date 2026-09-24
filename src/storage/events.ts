@@ -19,6 +19,8 @@ export type RunEventType =
   | 'rejudge.started'
   | 'rejudge.finished'
   | 'rejudge.failed'
+  | 'run.paused'
+  | 'run.resumed'
   | 'error'
 
 export interface RunEvent {

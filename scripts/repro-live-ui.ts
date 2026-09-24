@@ -24,7 +24,7 @@ const APP = 'http://127.0.0.1:5173'
 const FIXTURE = readFileSync('tests/fixtures/ebay/srp-results.html', 'utf8')
 const LISTING_FIXTURE = readFileSync('tests/fixtures/ebay/listing-t14s.html', 'utf8')
 const FIXTURE_PORT = 3999
-const PAGES = 1
+const PAGES = 2
 
 /** The results fixture is the bare `ul.srp-results` element, so wrap it in a page. */
 function fixturePage(): string {
@@ -74,10 +74,19 @@ let fixtureRequests = 0
 
 const fixtureServer = createServer((req, res) => {
   fixtureRequests++
-  const isListing = (req.url ?? '').startsWith('/listing')
+  const url = req.url ?? ''
   res.writeHead(200, { 'content-type': 'text/html' })
-  res.end(isListing ? LISTING_FIXTURE : fixturePage())
+  // What a challenge looks like to the pipeline: a title it recognises and a
+  // status that is not 200.
+  if (url.startsWith('/challenge')) {
+    res.end('<!doctype html><html><head><title>Pardon Our Interruption</title></head><body>challenge</body></html>')
+    return
+  }
+  res.end(url.startsWith('/listing') ? LISTING_FIXTURE : fixturePage())
 })
+
+/** Served once, so one Resume is enough to get past it. */
+let challengesServed = 0
 
 async function main() {
   rmSync(DB, { force: true })
@@ -94,6 +103,15 @@ async function main() {
     async goto(url: string) {
       const isListing = url.includes('/itm/')
       if (!isListing && pagesRead >= PAGES) return { status: 404 }
+      // A challenge on the second results page, once: the run pauses, the page
+      // offers Resume, and the same page is fetched again afterwards.
+      if (!isListing && /[?&]_pgn=2/.test(url) && challengesServed === 0) {
+        challengesServed++
+        await scraperPage.goto(`http://127.0.0.1:${FIXTURE_PORT}/challenge`, {
+          waitUntil: 'domcontentloaded',
+        })
+        return { status: 503 }
+      }
       await scraperPage.goto(`http://127.0.0.1:${FIXTURE_PORT}${isListing ? '/listing' : '/'}`, {
         waitUntil: 'domcontentloaded',
       })
@@ -166,7 +184,7 @@ async function main() {
         name: 'Repro search',
         keyword: 'fake keyword',
         criteriaText: 'fake criteria',
-        settings: { maxPages: 1, maxDetailVisits: 3, pacingMinMs: 200, pacingMaxMs: 400 },
+        settings: { maxPages: 2, maxDetailVisits: 3, pacingMinMs: 200, pacingMaxMs: 400 },
         spec: { ram_gb: 32, storage_gb: 512, touch: true, cpu_family: 'AMD', max_price: 1600 },
       }),
     })
@@ -180,6 +198,7 @@ async function main() {
   await page.waitForSelector('table')
 
   const samples: string[] = []
+  let pausesSeen = 0
   const sampleRun = async (label: string) => {
     const started = Date.now()
     while (Date.now() - started < 60_000) {
@@ -194,6 +213,11 @@ async function main() {
         `${label} t=${((Date.now() - started) / 1000).toFixed(1)}s status=${status} rows=${rows} | ${stats}`,
       )
       if (status === 'complete' || status === 'failed') return
+      // The person at the keyboard: a paused run is resumed from the page.
+      if (status === 'paused') {
+        pausesSeen++
+        await page.getByRole('button', { name: 'Resume' }).click()
+      }
       await page.waitForTimeout(1500)
     }
   }
@@ -203,6 +227,9 @@ async function main() {
   await page.click('button:has-text("Run search")')
   await page.waitForTimeout(500)
   await sampleRun('run2')
+
+  console.log(`\n--- stage 8: a challenge on page 2 ---`)
+  console.log(`paused runs seen on the page: ${pausesSeen}`)
 
   const log = await page.evaluate(() => (window as never as { __log: unknown[][] }).__log)
   console.log('\n--- samples ---')

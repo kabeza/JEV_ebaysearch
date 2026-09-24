@@ -9,6 +9,8 @@ import { DEFAULT_ACCEPTED_CONDITIONS, type SearchRequest } from '../jev/question
 import { createRun, getRun, finishRun } from '../storage/runs'
 import { nextQuestionnaireVersion } from '../storage/judgments'
 import type { QuestionnaireDraft } from '../jev/draft'
+import { createPause, type Pause } from './pause'
+import { updateRunStatus } from '../storage/runs'
 import { appendEvent, listEvents, type RunEvent } from '../storage/events'
 import { listListings } from '../storage/listings'
 import { getSearch } from '../storage/searches'
@@ -37,8 +39,33 @@ export interface StartRunOptions {
 const bus = new EventEmitter()
 bus.setMaxListeners(100)
 
-/** The one job in flight, a run or a re-judge — they share the lock (rule 9). */
-let active: { runId: number; cancelled: boolean; kind: 'run' | 'rejudge' } | null = null
+/**
+ * The one job in flight, a run or a re-judge — they share the lock (rule 9).
+ *
+ * `pause` is held per job rather than in a module singleton, so a paused run's
+ * signal dies with it and cannot be resumed after the job ends.
+ */
+let active: {
+  runId: number
+  cancelled: boolean
+  kind: 'run' | 'rejudge'
+  pause: Pause
+} | null = null
+
+/** True while the in-flight job is waiting for a person. */
+export function isPaused(): boolean {
+  return active?.pause.isPaused() ?? false
+}
+
+/**
+ * Wakes a paused run so it retries the page or batch it stopped on. False when
+ * nothing was paused, or when it was not this run: a stray click must not look
+ * like it did something.
+ */
+export function resumeRun(runId: number): boolean {
+  if (!active || active.runId !== runId) return false
+  return active.pause.resume()
+}
 
 export function activeRunId(): number | null {
   return active?.runId ?? null
@@ -51,6 +78,9 @@ export function isRunning(): boolean {
 export function cancelRun(runId: number): boolean {
   if (active?.runId !== runId) return false
   active.cancelled = true
+  // A cancel while paused must wake the run: it is waiting on a promise that
+  // only a resume or this releases, and a paused run holds the one-job lock.
+  active.pause.release()
   return true
 }
 
@@ -82,7 +112,17 @@ export function startRun(db: SqliteDatabase, o: StartRunOptions): number {
 
   const settings: RunSettings = { ...DEFAULTS, ...(o.settings ?? {}), ...(search.settings as Partial<RunSettings>) }
   const run = createRun(db, search.id, settings as unknown as Record<string, unknown>)
-  active = { runId: run.id, cancelled: false, kind: 'run' }
+  active = {
+    runId: run.id,
+    cancelled: false,
+    kind: 'run',
+    pause: createPause({
+      db,
+      runId: run.id,
+      setStatus: (status) => updateRunStatus(db, run.id, status),
+      emit: (type, payload) => emit(db, run.id, type, payload),
+    }),
+  }
 
   emit(db, run.id, 'run.started', {
     runId: run.id,
@@ -135,6 +175,9 @@ export function startRun(db: SqliteDatabase, o: StartRunOptions): number {
         maxPrice,
         screenshotsDir: o.screenshotsDir ?? 'data/screenshots',
         isCancelled: () => active?.cancelled ?? true,
+        // A challenge or an outage waits here instead of ending the run; the
+        // wait ends with the Resume button or the Cancel one.
+        pause: (detail) => active?.pause.wait(detail) ?? Promise.resolve(),
         // Without this the run writes events to SQLite but live viewers see
         // nothing until they reconnect. The pipeline must publish as it goes.
         publish: (event) => bus.emit(`run:${run.id}`, event),
@@ -198,7 +241,17 @@ export function startRejudge(db: SqliteDatabase, o: StartRejudgeOptions): { vers
   const client = (o.judgeClientFactory ?? createJevClient)()
   const version = nextQuestionnaireVersion(db, o.runId)
 
-  active = { runId: o.runId, cancelled: false, kind: 'rejudge' }
+  active = {
+    runId: o.runId,
+    cancelled: false,
+    kind: 'rejudge',
+    pause: createPause({
+      db,
+      runId: o.runId,
+      setStatus: (status) => updateRunStatus(db, o.runId, status),
+      emit: (type, payload) => emit(db, o.runId, type, payload),
+    }),
+  }
   // Set by the pipeline's own emit, so this does not double-report a failure.
   let emittedFailure = false
 

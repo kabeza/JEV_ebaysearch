@@ -98,6 +98,13 @@ export function rejudge(
   })
 }
 
+/** Wakes a paused run so it retries the page or batch it stopped on. */
+export function resumeRun(runId: number): Promise<{ resumed: boolean; runId: number }> {
+  return request<{ resumed: boolean; runId: number }>(`/api/runs/${runId}/resume`, {
+    method: 'POST',
+  })
+}
+
 export function cancelRun(runId: number): Promise<{ cancelled: boolean }> {
   return request<{ cancelled: boolean }>(`/api/runs/${runId}/cancel`, { method: 'POST' })
 }

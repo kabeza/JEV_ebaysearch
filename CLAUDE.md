@@ -17,7 +17,7 @@ it sits near 0.5, edit the questions, and re-judge the same listings without scr
 ## Commands
 
 ```bash
-npm test                  # vitest, 334 tests
+npm test                  # vitest, 353 tests
 npm run typecheck         # tsc on BOTH the server and web projects
 npm run dev:server        # API on 127.0.0.1:3001 (needs .env)
 npm run dev:web           # Vite page on 127.0.0.1:5173
@@ -216,6 +216,30 @@ These were established by probing the live site. Do not replace them with assump
     2026-09-24 has no question text at all (`{request, questionKeys}`) — it stays readable, and the
     editor falls back to the shipped wording.
 
+21. **A run can pause, and a pause waits for a person.** Two things reach it, and only two: a bot
+    challenge on a results page (403, 503, or a challenge-looking title — never a 404, which is how a
+    run past its last page ends) and a JEV outage that the SDK's retries did not survive (429 or 5xx;
+    a 401 still fails loudly). `src/pipeline/pause.ts` holds the signal as a value the runner owns per
+    job: `wait` writes `paused` and the `run.paused` event, `resume` is the way back, and `release` is
+    what a cancel uses — without it a cancelled pause would hold the one-job lock forever. **A paused
+    run keeps the lock**, because its visible browser owns the persistent profile.
+
+22. **`pause` is optional and additive.** With no handler, a challenge fails the run exactly as it did
+    before this existed; a retry with nothing to wait on would fetch the same page forever. Two more
+    things that are easy to get wrong: the pipeline's page loop needs an inner retry (a `continue` in
+    the outer loop skips the page that blocked), and `RunView` only receives the events named in its
+    own listener list — a pause the page never hears about leaves it showing `running` and offering
+    no way back.
+
+23. **Pacing comes from the run's settings, and the settings come from the search.**
+    `sleep = o.sleep ?? (() => pace(settings.pacingMinMs, settings.pacingMaxMs))`; it used to pace at
+    the `DEFAULTS` whatever a search asked for, which made the anti-403 mitigation decorative
+    (spec §9.2).
+
+24. **A 404 past page 1 is the end of the results, not an error.** The paging stops and the run
+    finishes with what it found; a 404 on page 1 still fails, because that is a search URL that is
+    wrong.
+
 ## Conventions
 
 - **TDD**: write the failing test, run it and watch it fail, implement minimally, watch it pass.
@@ -232,11 +256,16 @@ These were established by probing the live site. Do not replace them with assump
 
 ## Current state
 
-**Resume here (2026-09-24):** Stages 0–7 are complete. **Next is Stage 8, hardening** — the four
-failure modes of the spec's §11 table (bot challenge, markup change, cancellation, JEV outage), each
-triggered deliberately in a test. The plan's *Handoff* section lists what else is unfinished: the
-sponsored marker (rule 5) and that no search has ever had a real `spec` (nothing populates it — the
-question editor writes the draft's request but does not write it back to `searches`).
+**Resume here (2026-09-24):** **Stages 0–8 are complete — the build plan has no next stage.** What is
+left is the standing list: the sponsored marker (rule 5), `spec: {}` on every stored search (the
+question editor writes the draft's request but not back to `searches`), and the two things Stage 8
+deliberately left out (a pause that survives a process restart; any handling of a `401` beyond failing
+loudly).
+
+**A run pauses instead of dying since 2026-09-24.** A bot challenge or an exhausted JEV outage waits
+for a person — the browser stays open, the page says `paused`, and Resume continues from the same page
+or batch. `scripts/repro-live-ui.ts` proves it in the browser: `paused runs seen on the page: 1`, then
+`status=complete` after the click.
 
 **A stored run can be re-judged with edited questions since 2026-09-24**, at zero page loads: the
 question set lives in `questionnaires` as data (rules 19 and 20), a re-judge writes version 2 and
@@ -255,7 +284,7 @@ A run judges as part of the run, so it needs `TYPESAFE_API_KEY`: the client is b
 first page load, so a missing key fails the run in the first second rather than after spending eBay
 page loads on listings it could never judge. A 28-survivor run costs roughly $0.0015.
 
-334 tests passing, typecheck clean on both projects. The last full end-to-end run was 2026-09-23
+353 tests passing, typecheck clean on both projects. The last full end-to-end run was 2026-09-23
 (run 8: 85 cards, 20 survivors judged, $0.00238).
 
 **The report's copy is pure functions now.** `web/src/lib/reportText.ts` owns what an empty table

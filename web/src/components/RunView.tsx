@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   cancelRun,
   getRun,
+  resumeRun,
   type JevAnswer,
   type Judgment,
   type Listing,
@@ -108,6 +109,11 @@ export default function RunView({ runId, search, onClose }: Props) {
       'run.finished',
       'run.failed',
       'run.cancelled',
+      // A challenge or a JEV outage stops the run where it stands: without these
+      // the page keeps showing `running` and never offers Resume, which is the
+      // one thing a paused run needs from its reader.
+      'run.paused',
+      'run.resumed',
       'error',
       // A visited listing gains its item specifics; without this the table keeps
       // showing card data and the detail panel stays empty until a reload.
@@ -221,7 +227,15 @@ export default function RunView({ runId, search, onClose }: Props) {
         <div>
           <h2 className="text-lg text-almond-silk">
             Run {runId}{' '}
-            <span className="ml-2 rounded bg-dusty-grape px-2 py-0.5 text-sm text-seashell">
+            {/* A paused run is stopped, waiting for a person: it must not wear
+                the same badge as one that is working. */}
+            <span
+              className={`ml-2 rounded px-2 py-0.5 text-sm ${
+                run?.status === 'paused'
+                  ? 'bg-almond-silk text-space-indigo'
+                  : 'bg-dusty-grape text-seashell'
+              }`}
+            >
               {run?.status ?? 'loading'}
             </span>
           </h2>
@@ -253,6 +267,14 @@ export default function RunView({ runId, search, onClose }: Props) {
             selected={selected}
             onSelect={setQuestionnaireId}
           />
+          {run?.status === 'paused' && (
+            <button
+              onClick={() => void resumeRun(runId)}
+              className="rounded bg-almond-silk px-3 py-1.5 text-sm font-medium text-space-indigo"
+            >
+              Resume
+            </button>
+          )}
           {!finished && (
             <button
               onClick={() => void cancelRun(runId)}

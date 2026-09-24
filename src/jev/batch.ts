@@ -40,3 +40,23 @@ export function isTooLargeError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err)
   return /\b422\b/.test(message) || /unprocessable/i.test(message)
 }
+
+/**
+ * Whether an error means the service is overloaded rather than the request wrong.
+ *
+ * The SDK already retried 408/429/500–599 with backoff, so what arrives here has
+ * exhausted that. Checked the same way `isTooLargeError` checks 422 — the status
+ * on the thrown object, then the message — because the SDK surfaces it both ways.
+ * A 401 deliberately does not match: a bad key is a mistake to fix, not something
+ * to wait out.
+ */
+export function isOutageError(err: unknown): boolean {
+  if (typeof err === 'object' && err !== null) {
+    const status =
+      (err as { status?: unknown; statusCode?: unknown }).status ??
+      (err as { statusCode?: unknown }).statusCode
+    if (typeof status === 'number' && (status === 429 || status >= 500)) return true
+  }
+  const message = err instanceof Error ? err.message : String(err)
+  return /\b(429|5\d\d)\b/.test(message) || /rate limit|overloaded|timeout/i.test(message)
+}

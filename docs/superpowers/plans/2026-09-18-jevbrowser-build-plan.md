@@ -1639,19 +1639,62 @@ still starts from an empty spec.
 
 ---
 
-## Stage 8 — Hardening
+## Stage 8 — hardening (complete 2026-09-24)
 
-**Goal:** survive the real world.
+**Goal and acceptance, as written above, are met:** each failure in the spec's §11 table is triggered
+deliberately in a test, produces an event, takes a screenshot where relevant, and never reports an
+empty result as a success. 353 tests passing (334 before the stage), typecheck clean on both
+projects. The task list is `docs/superpowers/plans/2026-09-24-stage8-hardening-plan.md`; its design is
+`docs/superpowers/specs/2026-09-24-stage8-hardening-design.md`.
 
-**Deliverable:** a run that handles a bot challenge, a markup change, a cancellation and a JEV
-outage without losing data or lying about it.
+**What was built: a pause, and the four tests that trigger it.**
 
-**Files:** `src/pipeline/errors.ts`, `src/scraper/challenge.ts`, screenshot capture,
-`src/server/routes/cancel.ts`, plus a fixtures-based regression test that fails loudly when eBay's
-markup changes.
+`src/pipeline/pause.ts` is the signal, as a value the runner holds per job: `wait(detail)` records
+why, writes the status, emits `run.paused` and holds; `resume()` is the way back (status `running`,
+`run.resumed`), and `release()` is what a **cancel** uses, so a cancelled pause cannot hold the lock
+forever. Two things reach it, and only two:
 
-**Acceptance:** each of the four failures in the spec's §11 table is triggered deliberately in a
-test and produces an event, a screenshot where relevant, and no silent empty result.
+- **a bot challenge on a results page** — a 403, a 503, or a title that reads like one. The run waits
+  and then retries the same page. A 404 never pauses: it is how a run past its last page ends.
+- **a JEV outage** — 429 or 5xx *after* the SDK's own retries are exhausted (`isOutageError`, the
+  sibling of `isTooLargeError`). The run waits and retries the same batch. A 401 still fails loudly:
+  a bad key is a mistake to fix, not something to wait out.
+
+`pause` is optional and additive: with no handler, a challenge fails the run exactly as it did
+before, because a retry with nothing to wait on would fetch the same page forever. A paused run keeps
+the one-job lock, since its visible browser owns the persistent profile.
+
+**The browser proof.** `scripts/repro-live-ui.ts` now serves a challenge from its fixture server and
+makes page 2 of run 1 return 503 with the challenge's title. The page showed `paused`, the resume
+click continued the run, and it finished:
+
+```
+paused runs seen on the page: 1
+run1 t=4.5s status=paused rows=60 | pages 1 · cards seen 60 · stored 60 · filtered out 32 · details read 0
+run1 t=7.6s status=complete rows=58 | pages 2 · cards seen 120 · stored 60 · filtered out 32 · details read 3 · judged 28
+```
+
+**Three defects the stage found, each fixed with a test.**
+
+1. **A 404 past the first page failed the run.** Reaching the end of eBay's results was reported as an
+   error; now the paging stops and the run finishes with what it found. A 404 on page 1 still fails —
+   that is a search URL that is wrong.
+2. **The pipeline ignored the run's pacing settings**, pacing at the 1.5–3s defaults whatever a search
+   asked for. Pacing is the anti-403 mitigation (§9.2), so a search that asks for a slower pace now
+   gets it.
+3. **`RunView` never learned about the pause.** The run paused correctly in the database and the page
+   kept showing `running` for as long as it was left; the two new event names were missing from its
+   listener list. The repro caught it, not a unit test.
+
+**What the tests now pin, §11 row by row:** a challenge pauses and finishes after a resume; a repeat
+challenge pauses again; a cancelled pause ends as `cancelled` with its partial results; a markup change
+is `extraction_failed` or `no_cards_on_page` with a screenshot, never an empty success; a JEV outage
+pauses and the batch is judged on resume; a browser crash fails the run and leaves what was stored
+readable. `tests/fixtures/ebay/srp-broken.html` — the real capture with the card class renamed — pairs
+with `srp-results.html` as the deliberate markup-change detector (60 cards against 0).
+
+**Out of scope, deliberately:** surviving a *process restart* while paused (the wait lives in the
+process; the data does not), an automatic retry after a delay, and a pause on a 401.
 
 ---
 
@@ -1929,9 +1972,9 @@ finally has room above it — which was the question this whole thread started f
 
 ## Handoff — state at end of 2026-09-21 (updated 2026-09-24)
 
-**Working and verified:** Stages 0–7 complete.
+**Working and verified:** Stages 0–8 complete.
 
-- 334 tests passing, `tsc --noEmit` clean on both the server and web projects.
+- 353 tests passing, `tsc --noEmit` clean on both the server and web projects.
 - Live scraping verified repeatedly; three runs on 2026-09-21 (60 listings each).
 - **A full run with judging enabled completed against eBay on 2026-09-23 (run 8)** — the first
   since Stage 4. See "First real run" above for its numbers and the two things it exposed.
@@ -1946,10 +1989,10 @@ finally has room above it — which was the question this whole thread started f
 
 **Unfinished — pick up here next session:**
 
-1. **Stages 6 and 7 are complete** — see their sections above. **Next is Stage 8 (hardening):** the
-   four failure modes of the spec's §11 table, each triggered deliberately in a test. Nothing else
-   from Stage 7 is outstanding; a stored run can now be reopened, re-weighted, re-questioned and
-   re-judged without a single page load.
+1. **Every stage is complete** — see the section for each above, Stage 8 last. There is no next
+   stage in this plan. What remains is the standing list below: the sponsored marker, `spec: {}` on
+   every stored search, and the two hardening items §8 of Stage 8's design puts out of scope (a
+   pause that survives a process restart; anything at all for a `401`).
 
 2. **The sponsored marker is still a known defect.** `.s-card__sep b` is present on every card, so
    it carries no signal — a live run flagged 113 of 113. The field is retained as a raw observation

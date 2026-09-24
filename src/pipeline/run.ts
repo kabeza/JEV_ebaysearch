@@ -15,6 +15,7 @@ import { appendEvent, type RunEvent } from '../storage/events'
 import { finishRun, updateRunStats, type RunStatus } from '../storage/runs'
 import { prefilter, type Requirements } from './prefilter'
 import { judgeSurvivors } from './judge'
+import type { PauseDetail } from './pause'
 import type { JevClient } from '../jev/client'
 import type { SearchRequest } from '../jev/questions'
 import type { RunSettings } from '../shared/config'
@@ -40,8 +41,18 @@ export interface ExecuteRunOptions {
   maxPrice?: number
   /** Directory for failure screenshots. */
   screenshotsDir?: string
-  /** Return true to stop the run. Checked between pages. */
+  /** Return true to stop the run. Checked between pages and between batches. */
   isCancelled?: () => boolean
+  /**
+   * Called when the run cannot make progress without a person: a bot challenge,
+   * or a JEV outage the SDK's retries did not survive. It emits the event, sets
+   * the status, and **resolves when the run should continue** — with
+   * `isCancelled()` true if the person chose to stop instead.
+   *
+   * Absent, a challenge still fails the run as it always has: a retry with
+   * nothing to wait on would fetch the same page forever.
+   */
+  pause?: (detail: PauseDetail) => Promise<void>
   /**
    * Called with every event after it has been persisted, so live subscribers
    * (the SSE stream) see progress as it happens. Without this the events reach
@@ -135,7 +146,11 @@ function applyPrefilter(
  */
 export async function executeRun(o: ExecuteRunOptions): Promise<RunOutcome> {
   const now = o.now ?? Date.now
-  const sleep = o.sleep ?? pace
+  // The run's own pacing, not the defaults: a search that asks for a slower pace
+  // means it, and pacing is the anti-403 mitigation (spec §9.2). Ignoring
+  // `settings` here made every run as slow as the defaults allow and made the
+  // setting decorative.
+  const sleep = o.sleep ?? (() => pace(o.settings.pacingMinMs, o.settings.pacingMaxMs))
   const screenshotsDir = o.screenshotsDir ?? 'data/screenshots'
 
   const deadline = now() + o.settings.maxMinutes * 60_000
@@ -252,7 +267,7 @@ export async function executeRun(o: ExecuteRunOptions): Promise<RunOutcome> {
   }
 
   try {
-    for (let page = 1; page <= o.settings.maxPages; page++) {
+    pages: for (let page = 1; page <= o.settings.maxPages; page++) {
       if (o.isCancelled?.()) return stopWith('cancelled')
 
       if (now() >= deadline) {
@@ -268,9 +283,14 @@ export async function executeRun(o: ExecuteRunOptions): Promise<RunOutcome> {
         page,
       })
 
-      const res = await o.source.goto(url)
+      let res: { status: number }
+      // The same page, retried, when a challenge paused the run: `continue` here
+      // cannot advance the outer loop, or the page that blocked us would be
+      // skipped instead of retried.
+      for (;;) {
+        res = await o.source.goto(url)
+        if (res.status === 200) break
 
-      if (res.status !== 200) {
         const title = await o.source.title().catch(() => '')
         mkdirSync(screenshotsDir, { recursive: true })
         const shotPath = join(screenshotsDir, `run${o.runId}-page${page}-${res.status}.png`)
@@ -280,6 +300,35 @@ export async function executeRun(o: ExecuteRunOptions): Promise<RunOutcome> {
           (title ? ` (page title: "${title}")` : '') +
           (looksLikeChallenge(title) ? ' — looks like a bot challenge.' : '') +
           ` Screenshot: ${shotPath}`
+
+        // A 404 past the first page is eBay saying "no such page" — the results
+        // ended. Ending the run as `failed` there reported a normal end as an
+        // error; stopping the paging and finishing keeps what was found.
+        if (res.status === 404 && page > 1) {
+          emit('run.progress', { page, note: 'no more result pages', status: 404 })
+          break pages
+        }
+
+        // A 403 is a challenge even when the title says nothing: it is the status
+        // eBay returned when it rate-limited a real run (rule 10). A 404 never
+        // pauses — it is how a run past its last page ends, so waiting on it
+        // would hang every run that reaches its page cap.
+        const challenge = res.status === 403 || res.status === 503 || looksLikeChallenge(title)
+        if (challenge && o.pause) {
+          await o.pause({
+            reason: 'bot_challenge',
+            page,
+            status: res.status,
+            title,
+            screenshot: shotPath,
+            message,
+          })
+          // The wait ends on a resume **or** a cancel, so check which.
+          if (o.isCancelled?.()) return stopWith('cancelled')
+          emit('run.progress', { page, retrying: true, after: 'bot_challenge' })
+          continue
+        }
+
         emit('error', { page, status: res.status, title, screenshot: shotPath })
         return stopWith('failed', message)
       }
@@ -338,6 +387,7 @@ export async function executeRun(o: ExecuteRunOptions): Promise<RunOutcome> {
         batchSize: o.judge.batchSize,
         emit,
         isCancelled: o.isCancelled,
+        pause: o.pause,
       })
       judged = verdicts.judged
       jevInputTokens = verdicts.inputTokens

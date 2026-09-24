@@ -289,3 +289,19 @@ describe('POST /api/runs/:id/rejudge on a run with nothing to judge', () => {
     expect(payload.questionnaires).toHaveLength(0)
   })
 })
+
+describe('POST /api/runs/:id/resume', () => {
+  it('refuses to resume a run that is not paused, rather than pretending to', { timeout: RUN_TIMEOUT }, async () => {
+    const { runId } = await runFixture()
+    const res = await app!.inject({ method: 'POST', url: `/api/runs/${runId}/resume` })
+    expect(res.statusCode).toBe(409)
+    expect(res.json()).toEqual({ resumed: false, runId })
+  })
+
+  it('404s a run that does not exist', async () => {
+    await runFixture()
+    const res = await app!.inject({ method: 'POST', url: '/api/runs/999/resume' })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().resumed).toBe(false)
+  })
+})
