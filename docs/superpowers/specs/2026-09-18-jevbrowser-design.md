@@ -264,6 +264,17 @@ cookbook measures this at roughly 12× cheaper and 10× faster than one call per
 - One request carries `state = { request: {...}, listings: [ {...}, {...}, ... ] }` and questions
   keyed per item (`item_3.spec_match`, `item_3.price_value`, …).
 - The shared `request` object is sent **once**, not repeated per listing.
+- A listing's own facts are sent **once**, in its `listings[]` entry, and never restated per
+  question. Measured 2026-09-24 (`scripts/probe-facts-duplication.ts`, 20 listings, 120 questions):
+  restating them in all six questions cost **44% of the request** — 56,186 → 31,522 tokens — and
+  changed no gate decision, with five of six questions inside the model's own run-to-run noise. Each
+  question names its listing and points at its state entry instead.
+- The buyer's requirements are the exception: they stay in the question that asks about them.
+  Removing the criteria quote degraded `criteria_freeform` on 9 of 20 listings, up to 0.58 — that
+  question exists to quote them.
+- Since a question no longer says whether a listing page was opened, the **state** does, as
+  `listing_page_opened`: `item_specifics: null` cannot tell "never opened" from "nothing to say",
+  and only one of those licenses a guess.
 - Requests are **chunked**, default **10 listings per call**, configurable in the UI.
 - The documented size limit for one request is unknown; chunking keeps an oversized request a
   settings change rather than a rewrite, and a `422` is retried with the batch halved, down to 1.

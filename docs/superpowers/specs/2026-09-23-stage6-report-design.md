@@ -194,14 +194,20 @@ code, and so is the tier. Real samples from 539 stored listings:
 ```
 
 The parser accepts `<pct>% positive (<count>)`, where the count is `1,234`, `1234`, `17K`, `2.8K`,
-`969.9K` or `1.2M`; anything else returns `null` with no guess. The count is **always** displayed
-next to the badge, in every tier.
+`969.9K` or `1.2M`; anything else returns `null` with no guess. The count is **always** displayed,
+in every tier — inside the badge where there is one, beside the percentage where there is not.
 
 | Tier | Condition | Display |
 |---|---|---|
-| Trusted | exactly 100% and count ≥ 100 | solid badge |
-| Flawless but new | exactly 100% and count < 100 | faded badge |
-| Not marked | below 100%, or unparseable | no badge; the percentage is still shown in the row |
+| Trusted | exactly 100% and count ≥ 100 | solid badge, count in it |
+| Flawless but new | exactly 100% and count < 100 | faded badge, count in it |
+| Not marked | below 100%, or unparseable | no badge; the row reads `99.1% · 17,000`, or `—` when nothing parses |
+
+**Ruling (2026-09-24).** The prose above and the table disagreed about the Not marked tier: the prose
+said the count is always shown, the table mentioned only the percentage. The prose wins, and the tier
+with no badge now carries the count too. The reason is the one the badge exists for — 99.1% of 17,000
+is not 99.1% of 3 — and dropping it in the one tier where the percentage is worst is exactly
+backwards. `trustRowText` in `sellerTrust.ts` owns it.
 
 100% of 3 reviews is not 100% of 17,000, which is why the tier is split and why the count travels
 with the badge — the reader judges, the badge does not (spec §5.6.1). `100% positive (45)` and
@@ -209,17 +215,20 @@ with the badge — the reader judges, the badge does not (spec §5.6.1). `100% p
 
 ## 7. Export
 
-- **CSV** — one row per matching listing: title, URL, price, shipping, condition, seller, feedback,
-  the trust tier, each signal's normalised value, the blend, and whether it is highlighted. Resolved
-  answers only, so the file opens as a table.
+- **CSV** — one row per row the table is showing: title, URL, price, shipping, condition, seller,
+  feedback, the trust tier, each signal's normalised value, the blend, whether it is highlighted, and
+  which of the three states it is in (`matching`, `discarded`, `not judged yet`). Resolved answers
+  only, so the file opens as a table.
 - **JSON** — the same rows plus the **raw** answers (value, probabilities, confidence, legend) for
   every question. This is the file that can be re-analysed without calling JEV again, which is the
   property the whole stage rests on.
 - Both are built in the browser from the rows already on screen and downloaded with a `Blob`. No
   endpoint, no server round trip.
-- Export writes whichever rows the table is currently showing as matching — the discarded ones are
-  not in it unless the toggle is on, in which case **the export follows what is on screen** and the
-  row's discarded state is a column. What you see is what you get.
+- Export writes whichever rows the table is currently showing — the discarded ones are not in it
+  unless the toggle is on, in which case **the export follows what is on screen** and the row's state
+  is a column. The unjudged rows are on screen too, so they are in the file, with
+  `not judged yet` beside a null blend; they are not called discarded, which would say a threshold
+  threw them out when no question has been asked yet. What you see is what you get.
 
 ## 8. Testing
 

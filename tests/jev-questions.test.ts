@@ -92,12 +92,15 @@ describe('buildQuestions', () => {
     }
   })
 
-  it('says when the listing page was never read, so the model does not invent specifics', () => {
-    const withPage = buildQuestions(request, [listing({ detail: null })])
-    expect(withPage['L1.spec_match']!.instructions).toMatch(/no listing page/i)
-
-    const withSpecs = buildQuestions(request, [
+  // Measured 2026-09-24 (`scripts/probe-facts-duplication.ts`): restating the
+  // facts in all six questions cost 44% of the request and changed no gate
+  // decision. The state carries them once.
+  it('leaves the listing’s own facts to the state, naming the state entry instead', () => {
+    const q = buildQuestions(request, [
       listing({
+        price: 1200,
+        shipping: 0,
+        sellerFeedback: '99.1% positive',
         detail: {
           title: 't',
           price: 1,
@@ -110,7 +113,25 @@ describe('buildQuestions', () => {
         },
       }),
     ])
-    expect(withSpecs['L1.spec_match']!.instructions).toContain('RAM Size')
+    for (const key of QUESTION_KEYS) {
+      const text = q[`L1.${key}`]!.instructions
+      expect(text).toContain('state')
+      expect(text).toContain('L1')
+      // The item specifics and the seller record are the state's job. The title
+      // and price stay in the prefix: that is the shape the probe measured.
+      expect(text).not.toContain('32 GB')
+      expect(text).not.toContain('99.1% positive')
+    }
+  })
+
+  it('keeps the buyer’s own requirements in the question that asks about them', () => {
+    // The other half of the measurement: the criteria quote is what makes
+    // `criteria_freeform` work, and removing it (the `minimal` shape) degraded
+    // that answer on 9 of 20 listings, up to 0.58.
+    const q = buildQuestions(request, [listing()])
+    expect(q['L1.criteria_freeform']!.instructions).toContain(
+      '"32gb ram, Ryzen, 1tb, touch screen, under u$s 1600"',
+    )
   })
 
   it('keeps the question text free of the key name, which means nothing to the model', () => {
@@ -127,6 +148,36 @@ describe('buildState', () => {
     }
     expect(state.request).toEqual(request)
     expect(state.listings.map((l) => l.label)).toEqual(['L1', 'L2'])
+  })
+
+  it('says whether the listing page was opened, so an empty specifics map is not read as a full one', () => {
+    // The questions used to state this in words. Now that they do not, the state
+    // has to: `item_specifics: null` alone cannot tell "the page was never
+    // opened" from "the page had nothing to say", and only one of those licenses
+    // a guess.
+    const state = buildState(request, [
+      listing({ label: 'L1', detail: null }),
+      listing({
+        label: 'L2',
+        detail: {
+          title: 't',
+          price: 1,
+          shipping: 0,
+          condition: 'New',
+          sellerName: 's',
+          sellerFeedback: 'f',
+          specifics: { 'RAM Size': '32 GB' },
+          rawText: [],
+        },
+      }),
+    ]) as {
+      listings: { label: string; listing_page_opened: boolean; item_specifics: unknown }[]
+    }
+    expect(state.listings[0]).toMatchObject({ listing_page_opened: false, item_specifics: null })
+    expect(state.listings[1]).toMatchObject({
+      listing_page_opened: true,
+      item_specifics: { 'RAM Size': '32 GB' },
+    })
   })
 
   it('carries the item specifics when the listing page was read', () => {

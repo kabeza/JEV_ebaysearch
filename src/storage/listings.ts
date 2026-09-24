@@ -158,6 +158,20 @@ export function listSurvivors(db: SqliteDatabase, runId: number, limit?: number)
  * will never get. Separate from `listSurvivors` because the detail phase must
  * not re-open a page that already failed.
  */
+/**
+ * Everything the pre-filter kept, judged or not — what a re-judge re-asks about.
+ *
+ * Deliberately not `listToJudge`: that selects `survivor`/`detail_failed`, which
+ * is right for a first judging and empty for a re-judge, because every row it
+ * touches becomes `judged`.
+ */
+export function listJudgeable(db: SqliteDatabase, runId: number): StoredListing[] {
+  const rows = db
+    .prepare("select * from listings where run_id = ? and stage != 'rejected' order by id")
+    .all(runId) as Row[]
+  return rows.map(toListing)
+}
+
 export function listToJudge(db: SqliteDatabase, runId: number): StoredListing[] {
   const rows = db
     .prepare(

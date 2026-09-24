@@ -1581,19 +1581,61 @@ failed a gate.
 
 ---
 
-## Stage 7 — Persistence, re-open, re-judge
+## Stage 7 — persistence, re-open, re-judge (complete 2026-09-24)
 
-**Goal:** saved searches are re-runnable and past runs re-openable; questions can be edited and
-re-asked without scraping again.
+**Goal, deliverable and acceptance, as written above, are met.** 334 tests passing (280 before the
+stage), typecheck clean on both projects. The task list this was built from is
+`docs/superpowers/plans/2026-09-24-stage7-rejudge-plan.md`; its design is
+`docs/superpowers/specs/2026-09-24-stage7-rejudge-design.md`. Three of the four files the stage
+originally named were wrong about what it needed: `src/server/routes/rejudge.ts` became a route in
+`routes/runs.ts` (it shares the run's lock and its DB), `RunList.tsx` was never needed (the report
+already opens a run), and `src/storage/runs.ts` was not touched — the versions live in
+`questionnaires`, which already existed.
 
-**Deliverable:** reopen yesterday's run, change the questions, re-judge, and compare.
+**Acceptance, each one measured rather than argued:**
 
-**Files:** `src/storage/runs.ts`, `src/server/routes/rejudge.ts`, `web/src/components/RunList.tsx`,
-`web/src/components/QuestionEditor.tsx`
+| Criterion | Evidence |
+|---|---|
+| A re-judge loads no page | `fixture pages fetched during a re-judge: 0` in `scripts/repro-live-ui.ts` (the fixture server counts every page the scraper is served), and the server test asserts the injected source's call count is unchanged across a re-judge. |
+| A new version is created | `questionnaire versions offered: ["v2 · 13:41","v1 · 13:40"]` in the browser, and v1's answers are byte-identical after the re-judge in `tests/rejudge.test.ts`. |
+| Previous answers stay comparable | The row's panel reads `Matches your criteria 70% was 98%` — the edited question's answer moved and the old one is beside it. |
 
-**Acceptance:** re-judging a stored run makes no browser navigation at all (assert on the fake
-scraper's call count); a new questionnaire version is created; answers from the previous version
-remain readable and comparable.
+**What was built**
+
+- `src/jev/draft.ts` — the question set as data: `DraftQuestion`, the shipped bodies, `defaultDraft`,
+  `draftFromDefinition` (falls back to the shipped wording for a version stored before this stage),
+  `validateDraft`. No SDK import, so the browser editor can read it without pulling the JEV client in.
+- `src/jev/questions.ts` — `buildFromDraft` moved here (it needs `noul`/`score`), and `buildQuestions`
+  became a one-line wrapper over the default draft. One source of question text; the existing
+  `tests/jev-questions.test.ts` (14 cases pinning the bodies) is what made the move safe.
+- `src/pipeline/judge.ts` — the batching loop extracted into `askInBatches`, which knows nothing about
+  storage: it takes labelled listings and a `questionsFor`, and hands each batch back through
+  `onBatch`. `judgeSurvivors` and `rejudgeRun` are its two callers.
+- `src/pipeline/rejudge.ts` — `rejudgeRun`: validates the draft before spending anything, stores the
+  new version's definition (questions plus a pinned listing-id→label map), judges every non-rejected
+  listing, and never touches `listing.stage`.
+- `src/storage/judgments.ts` — `nextQuestionnaireVersion`; `saveQuestionnaire` now requires an
+  explicit version, because it previously defaulted to 1 and **no run could ever have a version 2**.
+- `src/pipeline/runner.ts` — `startRejudge`, under the same one-job-at-a-time lock a run takes.
+- `POST /api/runs/:id/rejudge` (202 `{runId, version}` · 400 with reasons · 409 while a job is active),
+  `GET /api/runs/:id` gains `questionnaires`, every judgment carries its `questionnaireId`.
+- `web/src/lib/versions.ts`, `VersionSelector.tsx`, `QuestionEditor.tsx`, and `was …` in
+  `AnswerDetail.tsx`. The export gained a `questionnaire` column.
+
+**Three things the work found, all in the spec's §2 or in the stage's own write-up:**
+
+1. §5.7 claimed the questions were versioned and that "the exact question definitions used" were
+   stored. Neither was true: `saveQuestionnaire` hardcoded version 1, and `definition_json` held
+   `{request, questionKeys}` — the question **text** was nowhere in the database.
+2. A re-judge built on `listToJudge` would have judged nothing: it selects `survivor`/`detail_failed`,
+   and after a first judging every row is `judged`. Hence `listJudgeable`.
+3. `listJudgments` returns every version, and `score.ts` keys answers by listing and question — so
+   handing the report both versions would have shown a silent mixture. The browser filters to one
+   version before ranking.
+
+**Still open:** `spec: {}` on every stored search. The editor is where it *could* be fixed — its
+criteria half writes the draft's request — but nothing writes it back to `searches`, so a fresh run
+still starts from an empty spec.
 
 ---
 
@@ -1784,6 +1826,28 @@ criterion, measured where it is claimed.
   ("missing is excluded, not penalised") produces that deliberately, but the consequence was never
   stated, and the defaults are a separate question the owner now has the controls to answer.
 
+### The interrupted verification, and the seven deferred minors (closed 2026-09-24)
+
+The fix pass above was finished but one verification was cut short by the 2026-09-23 shutdown: a
+report built from run 8 with only the first batch judged. `/tmp/run8.json` did not survive, so
+`.superpowers/sdd/2026-09-23-stage6-report-plan/probe-midrun-realdata.ts` now reads run 8 from
+`data/jevbrowser.db`. It reproduces the whole-run figures exactly (1 matching, top blend 0.726) and
+mid-run the ten unjudged survivors carry `blend: null` and appear in neither ranked list — the
+0.996–1.000 band is gone on real data, not only in the unit test.
+
+**All seven deferred minors are fixed, each with a failing test first.** 278 tests (was 261),
+typecheck clean.
+
+| Fixed | How |
+|---|---|
+| The "every weight is zero" banner fired at the start of every run | `blendAvailable` conflated "weights are zero" with "nothing judged yet". Split: `allWeightsZero` is the former only. Verified in the browser — the banner appears with every slider at 0 and goes when one is restored. |
+| "No listings yet." when the pre-filter took every card | `emptyReportMessage()` in a new `web/src/lib/reportText.ts`, which says all three silences differently. Seen in the browser: gating every row out reads "Nothing matched. 28 judged listings were discarded…". |
+| The export count excluded pending rows that are on screen | `rowsToExport()` includes them, in the table's order — and `rowStatus()` gives them their own `not judged yet`, because calling them discarded says a threshold threw them out when no question has been asked. |
+| "show N discarded" promised more rows than the limit renders | `visibleCount()` / `countLabel()`; the counts line reads `199 discarded (showing 50)`. |
+| "Not in the blend" named only missing answers | `ReportRow.zeroWeight` separates signals switched off by a zero weight from ones JEV never answered — two different sentences. |
+| The Not marked tier showed no review count | Owner's ruling: the spec's prose ("the count is always displayed") wins over its own table. The cell now reads `99.1% · 17,000`; spec §6 records the ruling. All seven feedback cells in the browser repro carry a count. |
+| `tests/export.test.ts` asserted only `toHaveLength(1)` | Asserts the raw answer and the URL instead. |
+
 ## First real run — judged end to end (2026-09-23)
 
 **Run 8, search 6, `batchSize: 10`, `maxPages: 2`, `maxDetailVisits: 20`.** The first run since
@@ -1824,23 +1888,50 @@ facts paragraph that the state already carries (47,919 of the 56,186 tokens at n
 text). So the 64k context is the binding limit, a batch of 20 already sits at 88% of it, and
 `batchSize: 10` was never the problem — the duplicated facts are.
 
-**Two things this run exposed, neither fixed yet:**
+**Two things this run exposed, one fixed since:**
 
-1. **The facts duplication is removable and worth ~3x.** Stating the facts once (in the state) and
-   having each question refer to the listing by label is what `questions.ts`'s comment already
-   claims it does. Changing it changes what the model sees, so it needs its own before/after probe
-   on the same listings before it is believed.
+1. **The facts duplication was removable — done on 2026-09-24**, at 44% of the request. See
+   "The questions got 44% cheaper" below.
 2. **Every stored search has `spec: {}`.** Nothing populates it — no UI form, and the API accepts
    whatever it is given. The run above used a search created by hand with a real spec
    (`ram_gb`, `storage_gb`, `cpu_family`, `touch`, `max_price`). With an empty spec the
    `spec_match` question asks about "no particular specification" and leans entirely on the verbatim
-   criteria text.
+   criteria text. **Still open.**
 
-## Handoff — state at end of 2026-09-21 (updated 2026-09-23)
+## The questions got 44% cheaper (2026-09-24)
 
-**Working and verified:** Stages 0–6 complete.
+**What was wrong.** `buildQuestions` wrote each listing's facts paragraph — card condition, price,
+shipping, seller, item specifics — into *all six* of its questions, on top of a state that already
+carried the same fields once per listing. At n=20 that was 47,919 of 56,186 tokens.
 
-- 255 tests passing, `tsc --noEmit` clean on both the server and web projects.
+**What the probe found.** `scripts/probe-facts-duplication.ts` sent the same 20 stored listings four
+ways and compared answers key by key — including a repeat of the unchanged request, because the
+first pass had no noise floor and mistook the model's own variance for an effect. It does vary: the
+identical request moved 7 of 120 answers by more than 0.05, `price_value` alone on 7 of 20 listings.
+
+| shape | tokens | cost | moved >0.05 | gate flips |
+|---|---|---|---|---|
+| current | 56,186 | $0.002360 | (repeat: 7 of 120) | 0 |
+| facts removed from the questions | 31,322 | $0.001316 | 13 of 120 | 0 |
+| facts and the buyer's words removed | 28,082 | $0.001179 | 23 of 120 | 0 |
+
+**What shipped: the middle row.** The listing's facts live in the state; each question names its
+listing and points at its state entry. Five of six questions stay inside the model's own noise,
+`price_value` moves a little more (9 of 20 against 7) and no gate decision changed at all. The
+bottom row was rejected: removing the criteria quote broke `criteria_freeform` — the question that
+exists to quote them — on 9 of 20 listings, up to 0.58. The state also gained
+`listing_page_opened`, because a question no longer says in words whether a listing page was read
+and `item_specifics: null` cannot tell "never opened" from "nothing to say".
+
+**Verified through the shipped path, not the probe's copy:** 31,522 input tokens, 120 answers,
+$0.00132. A batch of 20 now sits at ~49% of the 64k context where it sat at 88%, so `batchSize: 10`
+finally has room above it — which was the question this whole thread started from.
+
+## Handoff — state at end of 2026-09-21 (updated 2026-09-24)
+
+**Working and verified:** Stages 0–7 complete.
+
+- 334 tests passing, `tsc --noEmit` clean on both the server and web projects.
 - Live scraping verified repeatedly; three runs on 2026-09-21 (60 listings each).
 - **A full run with judging enabled completed against eBay on 2026-09-23 (run 8)** — the first
   since Stage 4. See "First real run" above for its numbers and the two things it exposed.
@@ -1855,17 +1946,20 @@ text). So the 64k context is the binding limit, a batch of 20 already sits at 88
 
 **Unfinished — pick up here next session:**
 
-1. **Stage 6 (report and controls) is complete** — see its section above. **Next is Stage 7**
-   (persistence, re-open, re-judge): a stored run can be reopened and re-weighted today, but the
-   questions cannot be edited and re-asked without scraping again, which is what Stage 7 adds.
+1. **Stages 6 and 7 are complete** — see their sections above. **Next is Stage 8 (hardening):** the
+   four failure modes of the spec's §11 table, each triggered deliberately in a test. Nothing else
+   from Stage 7 is outstanding; a stored run can now be reopened, re-weighted, re-questioned and
+   re-judged without a single page load.
 
 2. **The sponsored marker is still a known defect.** `.s-card__sep b` is present on every card, so
    it carries no signal — a live run flagged 113 of 113. The field is retained as a raw observation
    but is deliberately not displayed. Find the real discriminator before surfacing it.
 
-3. **The real end-to-end run happened on 2026-09-23 — see "First real run" below.** It answered the
+3. **The real end-to-end run happened on 2026-09-23 — see "First real run" above.** It answered the
    prompt-size question in the opposite direction to the guess: the limit is reached from the
-   *questions*, not the state, and `batchSize: 10` is not far below the ceiling — `20` is.
+   *questions*, not the state. That is now fixed — see "The questions got 44% cheaper" — so a batch
+   of 20 sits at ~49% of the context where it sat at 88%, and `batchSize: 10` has room above it.
+   Raising it is untested: nothing has measured a batch above 20 since the change.
 
 4. **eBay rate-limits by volume.** After roughly 50 page loads in a day, a run returned HTTP 403
    with the standard error page. Detail visits spend the same budget — hence `maxDetailVisits`.

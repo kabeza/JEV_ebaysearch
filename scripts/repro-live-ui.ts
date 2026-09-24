@@ -14,6 +14,7 @@ import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { chromium } from 'playwright'
 import { buildServer } from '../src/server/index.js'
 import { extractCards } from '../src/scraper/cards.js'
+import { WEIGHTED_SIGNALS } from '../web/src/lib/score.js'
 import { extractDetail } from '../src/scraper/listing.js'
 import type { PageSource } from '../src/scraper/browser.js'
 import type { JevAnswer, JevClient, JevRequest, JevResult } from '../src/jev/client.js'
@@ -44,7 +45,10 @@ function fakeJevClient(): JevClient {
       for (const key of Object.keys(req.questions)) {
         const short = key.split('.').pop() ?? ''
         const n = seen++
-        const wobble = short === 'is_target_product' && n % 7 === 0 ? 0.52 : 0.9 + (n % 9) / 100
+        // A question the repro's editor has edited answers differently, so the
+        // row diff has a real change to show rather than two identical numbers.
+        const edited = JSON.stringify(req.questions[key]).includes('Edited by the repro')
+        const wobble = edited ? 0.7 : short === 'is_target_product' && n % 7 === 0 ? 0.52 : 0.9 + (n % 9) / 100
         answers[key] =
           short === 'listing_trust' || short === 'price_value'
             ? {
@@ -54,14 +58,22 @@ function fakeJevClient(): JevClient {
                 legend: { '0': 'warning signs', '1': 'something is off', '2': 'ordinary', '3': 'solid', '4': 'fully reassuring' },
                 probabilities: { '0': 0.05, '1': 0.1, '2': 0.5, '3': 0.3, '4': 0.05 },
               }
-            : { type: 'noul', noul: Math.min(0.98, wobble) }
+            : { type: 'noul', noul: edited ? 0.7 : Math.min(0.98, wobble) }
       }
       return { model: 'fake', answers, usage: { input_tokens: 8_000, output_tokens: 200 } }
     },
   }
 }
 
+/**
+ * Counts every page the scraper is served. Stage 7's acceptance criterion is that
+ * a re-judge adds zero to this number: it re-asks about listings already stored,
+ * so it must not touch eBay — or, here, the fixture standing in for it.
+ */
+let fixtureRequests = 0
+
 const fixtureServer = createServer((req, res) => {
+  fixtureRequests++
   const isListing = (req.url ?? '').startsWith('/listing')
   res.writeHead(200, { 'content-type': 'text/html' })
   res.end(isListing ? LISTING_FIXTURE : fixturePage())
@@ -273,6 +285,18 @@ async function main() {
     .catch(() => '(no specifics panel)')
   console.log(`\nspecifics panel:\n${specifics.split('\n').slice(0, 8).join('\n')}`)
 
+  // The feedback cell, in both of its shapes: a badged seller and one with no
+  // badge. The count belongs in both (spec §6) — 99.5% of 14.7K is not 99.5% of
+  // 3 — and this is the cell that once printed the percentage twice.
+  const feedbackCells = await page.evaluate(() =>
+    [...document.querySelectorAll('table tbody tr')]
+      .map((tr) => (tr.querySelector('td:nth-child(6)')?.textContent ?? '').trim())
+      .filter((text) => text.length > 0),
+  )
+  const barePercent = feedbackCells.filter((text) => /^\d+(\.\d+)?%$/.test(text))
+  console.log(`\nfeedback cells:\n${feedbackCells.slice(0, 8).join('\n')}`)
+  console.log(`feedback cells showing a percentage with no count: ${barePercent.length}`)
+
   // The acceptance criterion that cannot be tested without a browser: moving a
   // control re-sorts the table with zero network requests (spec §5.6).
   const fetchCount = async () =>
@@ -334,6 +358,96 @@ async function main() {
   console.log(`first row changed by the weight: ${firstBefore !== firstAfter}`)
   console.log(`first row before: ${JSON.stringify(firstBefore.slice(0, 60))} … ${JSON.stringify(firstBefore.slice(-60))}`)
   console.log(`first row after:  ${JSON.stringify(firstAfter.slice(0, 60))} … ${JSON.stringify(firstAfter.slice(-60))}`)
+
+  // Stage 7's acceptance criterion, measured where it is claimed: editing the
+  // questions and re-judging the stored listings touches eBay not at all.
+  const pagesBeforeRejudge = fixtureRequests
+  const rejudgeButton = page.getByRole('button', { name: 'Edit questions' })
+  const editorOpened = await rejudgeButton
+    .click()
+    .then(() => true)
+    .catch(() => false)
+  await page.waitForTimeout(200)
+
+  const edited = await page.evaluate(() => {
+    const textarea = document.querySelector(
+      'textarea[aria-label="instructions criteria_freeform"]',
+    ) as HTMLTextAreaElement | null
+    if (!textarea) return false
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+    setter?.call(textarea, 'Edited by the repro: does this satisfy the buyer, really?')
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    return true
+  })
+
+  if (edited) {
+    await page.getByRole('button', { name: /Re-judge/ }).click()
+    // The re-judge is a background job over ~28 stored listings; wait for its
+    // version to appear in the selector rather than for a fixed delay.
+    for (let i = 0; i < 60; i++) {
+      const options = await page.locator('select[aria-label="questionnaire version"] option').count()
+      if (options >= 2) break
+      await page.waitForTimeout(250)
+    }
+  }
+  const pagesAfterRejudge = fixtureRequests
+  const versions = await page
+    .locator('select[aria-label="questionnaire version"] option')
+    .allInnerTexts()
+
+  console.log(`\nre-judge: editor opened=${editorOpened} textarea found=${edited}`)
+  console.log(`fixture pages fetched during a re-judge: ${pagesAfterRejudge - pagesBeforeRejudge}`)
+  console.log(`questionnaire versions offered: ${JSON.stringify(versions)}`)
+
+  // The third acceptance criterion: the previous version's answers are still
+  // readable, beside the new ones. Open the first row and look for "was".
+  // An earlier check already expanded a row, and clicking its button again would
+  // close it — so open one only when none is open.
+  const anyOpen = await page.locator('table tbody [aria-expanded="true"]').count()
+  if (anyOpen === 0) {
+    await page
+      .locator('table tbody tr button[aria-expanded]')
+      .first()
+      .click({ timeout: 5000 })
+      .catch(() => undefined)
+    await page.waitForTimeout(400)
+  }
+  const diffLines = await page.evaluate(() =>
+    [...document.querySelectorAll('table tbody li')]
+      .map((li) => (li.textContent ?? '').replace(/\s+/g, ' ').trim())
+      .filter((text) => text.includes('was ')),
+  )
+  // The edited question is the whole point: its answer is the one that must move,
+  // and the previous version's answer must still be there to compare against.
+  // `textContent` does not lay the DOM out, so it inserts no spaces between
+  // elements where `innerText` did — the pattern allows for either.
+  const answerMoved = diffLines.some((line) => /70%\s*was /.test(line))
+  console.log(`diff lines on the first row: ${JSON.stringify(diffLines)}`)
+  console.log(`the edited question's answer moved: ${answerMoved}`)
+
+  // The two states the report used to tell apart wrongly. Every weight at zero
+  // is news — the reader turned them off. No answers yet is not: that is simply
+  // what a run looks like in its first seconds, and the banner fired there too.
+  const bodyText = () => page.evaluate(() => document.body.innerText)
+  for (const signal of WEIGHTED_SIGNALS) await setRange(`weight ${signal}`, '0')
+  await page.waitForTimeout(200)
+  const bannerWhenAllZero = (await bodyText()).includes('Every weight is zero')
+  await setRange('weight spec_match', '1')
+  await page.waitForTimeout(200)
+  const bannerWhenNotZero = (await bodyText()).includes('Every weight is zero')
+  console.log(`\nbanner with every weight at zero: ${bannerWhenAllZero}`)
+  console.log(`banner with one weight restored: ${bannerWhenNotZero}`)
+
+  // Every judged row gated out, so the table has no rows to show at all.
+  await setRange('gate is_target_product', '1')
+  await setRange('gate condition_ok', '1')
+  await page.waitForTimeout(300)
+  const emptyCell = await page
+    .locator('table tbody tr td[colspan]')
+    .first()
+    .innerText()
+    .catch(() => '(no empty-state cell)')
+  console.log(`empty table with every row gated out: ${JSON.stringify(emptyCell)}`)
 
   await browser.close()
   await scraperBrowser.close()

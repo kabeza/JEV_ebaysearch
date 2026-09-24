@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { CSV_COLUMNS, toCsv, toJson } from '../web/src/lib/export'
+import { CSV_COLUMNS, rowStatus, toCsv, toJson } from '../web/src/lib/export'
 import type { ReportRow } from '../web/src/lib/score'
 import type { JevAnswer, Listing } from '../web/src/lib/api'
 
@@ -46,6 +46,7 @@ function row(over: Partial<ReportRow> = {}): ReportRow {
     matching: true,
     highlighted: true,
     missing: [],
+    zeroWeight: [],
     trust: { raw: '100% positive (19K)', pct: 100, count: 19000, tier: 'trusted' },
     discardReason: null,
     ...over,
@@ -83,12 +84,60 @@ describe('toCsv', () => {
     expect(csv.split('\n')[1]!.split(',')).toContain('')
     expect(csv.split('\n')[1]).not.toContain(',0,')
   })
+
+  it('says which questionnaire version produced the file', () => {
+    // A run can carry several versions, so a report without this cannot be
+    // reproduced — and the column is the version *number*, not the row's id.
+    const csv = toCsv([row()], 2)
+    const header = csv.split('\n')[0]!.split(',')
+    const cells = csv.split('\n')[1]!.split(',')
+    expect(header[header.length - 1]).toBe('questionnaire')
+    expect(cells[cells.length - 1]).toBe('2')
+  })
+
+  it('leaves the version blank when the caller does not know it', () => {
+    const cells = toCsv([row()]).split('\n')[1]!.split(',')
+    expect(cells[cells.length - 1]).toBe('')
+  })
+
+  it('calls a row nobody has judged what it is, not discarded', () => {
+    // A pending row is on screen, so it is in the file — and its status column
+    // has to say so. Calling it "discarded" would say a threshold threw it out
+    // when in fact no question has been asked yet.
+    const csv = toCsv([
+      row({ answers: {}, blend: null, matching: false, highlighted: false, values: {
+        spec_match: null,
+        price_value: null,
+        listing_trust: null,
+        criteria_freeform: null,
+        seller_feedback: 1,
+        shipping: 1,
+      } }),
+    ])
+    const fields = csv.trim().split('\n')[1]!.split(',')
+    expect(csv).toContain('not judged yet')
+    expect(csv).not.toContain('discarded')
+    expect(fields[fields.length - 1]).not.toContain('matching')
+  })
+})
+
+describe('rowStatus', () => {
+  it('says which of the three states a row is in', () => {
+    expect(rowStatus(row())).toBe('matching')
+    expect(rowStatus(row({ matching: false }))).toBe('discarded')
+    expect(rowStatus(row({ answers: {}, matching: false, blend: null }))).toBe('not judged yet')
+  })
 })
 
 describe('toJson', () => {
   it('keeps the raw answers, so a run can be re-analysed without JEV', () => {
-    const parsed = JSON.parse(toJson([row()])) as { rows: ReportRow[] }[]
+    // `toHaveLength(1)` held for any single-element array — including an empty
+    // object's — so this asserts what the file is actually for: the answer with
+    // its own scale intact, and a URL to get back to the listing from.
+    const parsed = JSON.parse(toJson([row()])) as ReportRow[]
     expect(parsed).toHaveLength(1)
+    expect(parsed[0]!.answers.price_value).toEqual(SCORE)
+    expect(parsed[0]!.listing.url).toBe('https://www.ebay.com/itm/205910982038')
   })
 
   it('round-trips through JSON unchanged', () => {

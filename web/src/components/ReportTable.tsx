@@ -2,6 +2,9 @@ import { Fragment, useState } from 'react'
 import { ListingDetailPanel } from './AnswerDetail'
 import { SellerBadge } from './SellerBadge'
 import { WEIGHTED_SIGNALS, type Report, type ReportSettings, type SortColumn } from '../lib/score'
+import { countLabel, emptyReportMessage } from '../lib/reportText'
+import type { JevAnswer } from '../lib/api'
+import { trustRowText, type SellerTrust } from '../lib/sellerTrust'
 
 function money(v: number | null): string {
   return v === null ? '—' : `$${v.toFixed(2)}`
@@ -19,8 +22,22 @@ const COLUMNS: { key: SortColumn; label: string; className?: string }[] = [
 interface Props {
   report: Report
   settings: ReportSettings
+  /** Cards the pre-filter stopped, so an empty table can say they existed. */
+  rejectedCount: number
+  /** The previous version's answers by listing, for the row's "was …". */
+  previousAnswers?: Map<number, Record<string, JevAnswer>>
   onSort: (column: SortColumn) => void
   onToggleDiscarded: (show: boolean) => void
+}
+
+/**
+ * The feedback cell. A badge carries the count when there is a tier; without one
+ * the percentage is printed, and with it the count — the reader is the one who
+ * should judge what 99.1% of 17,000 is worth (spec §6).
+ */
+function TrustCell({ trust }: { trust: SellerTrust }) {
+  const text = trustRowText(trust)
+  return text === null ? <SellerBadge trust={trust} /> : <>{text}</>
 }
 
 /**
@@ -32,7 +49,14 @@ interface Props {
  * discarded rows, the unjudged ones, and how many rows the limit is holding
  * back (CLAUDE.md rule 7 — silence is a bug).
  */
-export function ReportTable({ report, settings, onSort, onToggleDiscarded }: Props) {
+export function ReportTable({
+  report,
+  settings,
+  rejectedCount,
+  previousAnswers,
+  onSort,
+  onToggleDiscarded,
+}: Props) {
   const [openId, setOpenId] = useState<number | null>(null)
 
   const rows = [...report.matching, ...report.pending]
@@ -59,7 +83,7 @@ export function ReportTable({ report, settings, onSort, onToggleDiscarded }: Pro
 
   return (
     <div className="overflow-x-auto">
-      {!report.blendAvailable && (
+      {report.allWeightsZero && (
         <p className="mb-2 rounded border border-almond-silk/40 bg-dusty-grape/30 p-2 text-sm text-almond-silk">
           Every weight is zero, so there is no blend and no order. Raise a weight to rank.
         </p>
@@ -121,14 +145,7 @@ export function ReportTable({ report, settings, onSort, onToggleDiscarded }: Pro
                   {row.listing.sellerName ?? '—'}
                 </td>
                 <td className="py-2 pr-3 whitespace-nowrap text-lilac-ash">
-                  {/* A badge carries the count; without one the percentage is
-                      still stated (spec §5.6.1). Printing both would say 100%
-                      twice. */}
-                  {row.trust.tier === 'not_marked' ? (
-                    row.trust.pct === null ? '—' : `${row.trust.pct}%`
-                  ) : (
-                    <SellerBadge trust={row.trust} />
-                  )}
+                  <TrustCell trust={row.trust} />
                 </td>
                 <td className="py-2 pr-3 whitespace-nowrap font-mono text-almond-silk">
                   {row.blend === null ? '—' : row.blend.toFixed(3)}
@@ -147,11 +164,18 @@ export function ReportTable({ report, settings, onSort, onToggleDiscarded }: Pro
                         questionKey,
                         answer,
                       }))}
+                      previous={previousAnswers?.get(row.listing.id)}
                     />
                     {row.missing.length > 0 && (
                       <p className="mt-2 text-xs text-lilac-ash/70">
                         Not in the blend — no answer for{' '}
                         {row.missing.map((s) => s.replace(/_/g, ' ')).join(', ')}
+                      </p>
+                    )}
+                    {row.zeroWeight.length > 0 && (
+                      <p className="mt-2 text-xs text-lilac-ash/70">
+                        Not in the blend — weight is zero for{' '}
+                        {row.zeroWeight.map((s) => s.replace(/_/g, ' ')).join(', ')}
                       </p>
                     )}
                     {Object.keys(row.answers).length === 0 && (
@@ -168,11 +192,12 @@ export function ReportTable({ report, settings, onSort, onToggleDiscarded }: Pro
           {visible.length === 0 && (
             <tr>
               <td colSpan={8} className="py-4 text-lilac-ash/70">
-                {report.discardedCount > 0
-                  ? `Nothing matched. ${report.discardedCount} judged listings were discarded — tick “show discarded” to inspect them.`
-                  : report.pendingCount > 0
-                    ? `${report.pendingCount} listings are waiting to be judged.`
-                    : 'No listings yet.'}
+                {emptyReportMessage({
+                  matchingCount: report.matchingCount,
+                  pendingCount: report.pendingCount,
+                  discardedCount: report.discardedCount,
+                  rejectedCount,
+                })}
               </td>
             </tr>
           )}
@@ -180,9 +205,9 @@ export function ReportTable({ report, settings, onSort, onToggleDiscarded }: Pro
       </table>
 
       <p className="mt-2 text-xs text-lilac-ash/70">
-        {report.matchingCount} matching
-        {report.matchingCount > settings.maxRows ? ` (showing ${settings.maxRows})` : ''} ·{' '}
-        {report.discardedCount} discarded · {report.pendingCount} not judged yet
+        {countLabel(report.matchingCount, settings.maxRows)} matching ·{' '}
+        {countLabel(report.discardedCount, settings.maxRows)} discarded · {report.pendingCount} not
+        judged yet
         {report.discardedCount > 0 && !settings.showDiscarded && (
           <>
             {' · '}

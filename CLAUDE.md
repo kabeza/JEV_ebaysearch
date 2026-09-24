@@ -17,7 +17,7 @@ it sits near 0.5, edit the questions, and re-judge the same listings without scr
 ## Commands
 
 ```bash
-npm test                  # vitest, 211 tests
+npm test                  # vitest, 334 tests
 npm run typecheck         # tsc on BOTH the server and web projects
 npm run dev:server        # API on 127.0.0.1:3001 (needs .env)
 npm run dev:web           # Vite page on 127.0.0.1:5173
@@ -28,6 +28,8 @@ node --import tsx scripts/recon-listing.ts    # probe one listing page (Stage 4 
 node --import tsx scripts/build-listing-fixture.ts  # rebuild a listing fixture from a capture
 node --import tsx scripts/probe-access.ts     # the headless-vs-headed access matrix
 node --import tsx scripts/repro-live-ui.ts    # drive the real UI with no eBay (start dev:web first)
+node --import tsx scripts/probe-batch-size.ts         # what a batch costs in tokens, per size
+node --env-file=.env --import tsx scripts/probe-facts-duplication.ts  # re-measure what the questions carry
 ```
 
 `.env` must contain `TYPESAFE_API_KEY`. It is gitignored — keep it that way.
@@ -39,11 +41,15 @@ src/shared/types + config   DEFAULTS, PRICING, LIMITS, MODEL_ALIAS, estimateCost
 src/storage/                schema.sql + db/runs/listings/events/searches repositories
 src/scraper/                url.ts (buildSearchUrl), cards.ts (extractCards),
                             listing.ts (extractDetail), browser.ts (PageSource)
-src/pipeline/               run.ts (executeRun), runner.ts (startRun, one run at a time),
-                            prefilter.ts, judge.ts (judgeSurvivors)
-src/jev/                    client.ts (JevClient + fake), env.ts, questions.ts, batch.ts
+src/pipeline/               run.ts (executeRun), runner.ts (startRun/startRejudge, one job at a
+                            time), prefilter.ts, judge.ts (judgeSurvivors, askInBatches),
+                            rejudge.ts (rejudgeRun)
+src/jev/                    client.ts (JevClient + fake), env.ts, questions.ts (keys, types,
+                            buildState, buildFromDraft), draft.ts (the editable question set),
+                            batch.ts
 src/server/                 Fastify routes: searches, runs, SSE event stream
-web/                        Vite + React + TS + Tailwind
+web/                        Vite + React + TS + Tailwind (lib/versions.ts separates questionnaire
+                            versions before the report ranks anything)
 tests/fixtures/ebay/        real captured eBay HTML, used for offline scraper tests
 ```
 
@@ -110,13 +116,17 @@ These were established by probing the live site. Do not replace them with assump
 
 11b. **What actually bounds batch size is the question text, not the state.** Measured on
     2026-09-23 with `scripts/probe-batch-size.ts` against 20 stored judged listings: `state` costs
-    **~291 tokens per listing**, so the 32k state limit would allow ~109 listings. The full request
-    (state + six questions) costs **~2,414–2,809 tokens per listing**, because `buildQuestions`
-    writes the listing's facts paragraph into *each* of the six questions even though `buildState`
-    already carries the same facts. So the 64k context binds long before the 32k state: a batch of
-    10 measured 32,047 input tokens and a batch of 20 measured 56,186 — 88% of the context. The
-    duplication is the cost driver and it is removable; the state never was. Re-measure with the
-    probe after any change to the questions.
+    **~291 tokens per listing**, so the 32k state limit would allow ~109 listings. Measured again on
+    2026-09-24 with `scripts/probe-facts-duplication.ts`, and then fixed: `buildQuestions` no longer
+    writes the listing's facts paragraph into each of the six questions, so a batch of 20 costs
+    **31,522 tokens** where it cost 56,186 — 49% of the 64k context instead of 88%, because the
+    questions *were* the cost driver, not the state. **Do not restate a listing's facts in a
+    question.** Two numbers say why the fix is safe: the same request sent twice moved 7 of 120
+    answers by more than 0.05 (`price_value` alone moved on 7 of 20 listings — the model is not
+    deterministic, so a delta smaller than that is not an effect), and removing the facts moved 13
+    of 120 with **zero gate decisions flipped**, five questions inside that noise. The probe caches
+    its responses in `data/probe-facts-duplication.json`, so re-analysis is free; re-measure with it
+    after any change to the questions.
 
 12. **`legend` and `probabilities` on a score answer are keyed by STRING index** (`"0"`, `"1"`…),
     not integers. Assuming numbers renders blank cells. And **`score` is not that index** — it is a
@@ -158,20 +168,24 @@ These were established by probing the live site. Do not replace them with assump
     assuming names like "RAM Size" exist.
 
 
-16. **A question key is invisible to the model.** JEV sees only each question's `instructions`
-    text, so a question that does not name its listing is asking about all of them at once. Every
-    question opens "About listing L3 — «title» at $1,299.99: …", and labels are assigned per run in
-    card order. Two consequences: the same facts are stated once and reused by all six questions
-    (inconsistent subsets invite inconsistent answers), and the buyer's criteria are quoted
-    verbatim, in quotes. `src/jev/questions.ts` owns this; build questions with the SDK's
+16. **A question key is invisible to the model, and so are the state's field names.** JEV sees only
+    each question's `instructions` text, so a question that does not name its listing is asking
+    about all of them at once. Every question opens "About listing L3 — «title» at $1,299.99: Its
+    card, price, seller and item specifics are the state's entry for L3. …", and labels are assigned
+    per run in card order. **A listing's facts are stated once — in its `listings[]` entry — never
+    restated per question**; that was measured, not assumed (rule 11b, and see §8.3 of the design
+    spec). The buyer's criteria and requirements are the exception: they stay in the question that
+    asks about them, in quotes, because removing the quote measurably degraded
+    `criteria_freeform`. `src/jev/questions.ts` owns this; build questions with the SDK's
     `noul()`/`score()` helpers so a change in what JEV accepts breaks the build. Note the naming:
     `SearchRequest` (what the buyer asked for) is deliberately not `JevRequest` (the state +
     questions envelope in `client.ts`).
 
 17. **Judging is a phase of the run, after the detail phase.** Every survivor is judged, including
     ones whose listing page failed (`detail_failed`) and ones past `maxDetailVisits` — those are
-    judged on card data alone, and the question text says no listing page was opened so the model
-    does not invent specifics. One call per `batchSize` (default 10) listings; a `422` halves the
+    judged on card data alone, and the state says so in `listing_page_opened`, because
+    `item_specifics: null` cannot distinguish "the page was never opened" from "the page had nothing
+    to say" and only one of those licenses a guess. One call per `batchSize` (default 10) listings; a `422` halves the
     batch *permanently for the run* (a size refused once will be refused again) down to 1, and a
     listing still refused fails the run loudly. Cost is a fraction of a cent: two listings with
     twelve questions measured 3,632 input tokens, $0.00015. **The judge phase selects through
@@ -180,6 +194,27 @@ These were established by probing the live site. Do not replace them with assump
     else ever comes back for it, so a finished run shows it as still waiting. It took a review of
     Stage 6 to surface, because the report was the first thing to display "not judged yet" and make
     the wait visible.
+
+18. **A re-judge re-asks; it does not re-scrape.** It selects `listJudgeable` — every listing the
+    pre-filter kept, `stage != 'rejected'` — and **not** `listToJudge`, which selects
+    `survivor`/`detail_failed` and returns nothing at all once every row is `judged`. It never
+    touches `listing.stage` and it never builds a `PageSource`. It takes the same one-job-at-a-time
+    lock a run takes, so a run and a re-judge can never overlap (rule 9).
+
+19. **A run's questions are data now, and they are versioned.** `src/jev/draft.ts` owns them:
+    `DraftQuestion`, the shipped bodies, `defaultDraft`, `draftFromDefinition`, `validateDraft`. The
+    text a person edits is the question's **body** — the `About listing L3 …` prefix and the buyer's
+    requirements are generated from the draft's request at build time, so an edit cannot leave a
+    question unnamed (rule 16) or a quoted criterion stale. Two consequences worth knowing:
+    `buildQuestions` is now a wrapper over `defaultDraft`, so the shipped constants and the editor
+    cannot drift; and `draft.ts` imports no SDK, because the browser's editor reads it.
+
+20. **`listJudgments` returns every questionnaire version.** Anyone ranking or displaying answers
+    must filter to one version first: `score.ts` keys answers by listing and question, so two
+    versions of the same answer handed together would overwrite each other silently and the report
+    would show a mixture. `web/src/lib/versions.ts` does the filtering. A version stored before
+    2026-09-24 has no question text at all (`{request, questionKeys}`) — it stays readable, and the
+    editor falls back to the shipped wording.
 
 ## Conventions
 
@@ -197,16 +232,36 @@ These were established by probing the live site. Do not replace them with assump
 
 ## Current state
 
-**Resume here (2026-09-21):** Stages 0–5 are complete. **Next is Stage 6, the report and controls.**
-The plan's *Handoff* section lists what is unfinished; the two items that matter most are that no
-real end-to-end run has happened since Stage 4 (so prompt sizes are unmeasured and `batchSize: 10`
-is probably far below the 32k limit), and that the sponsored marker is still a known defect.
+**Resume here (2026-09-24):** Stages 0–7 are complete. **Next is Stage 8, hardening** — the four
+failure modes of the spec's §11 table (bot challenge, markup change, cancellation, JEV outage), each
+triggered deliberately in a test. The plan's *Handoff* section lists what else is unfinished: the
+sponsored marker (rule 5) and that no search has ever had a real `spec` (nothing populates it — the
+question editor writes the draft's request but does not write it back to `searches`).
 
-A run now judges as part of the run, so it needs `TYPESAFE_API_KEY`: the client is built before the
+**A stored run can be re-judged with edited questions since 2026-09-24**, at zero page loads: the
+question set lives in `questionnaires` as data (rules 19 and 20), a re-judge writes version 2 and
+judges every listing the pre-filter kept, and the report shows one version at a time with a per-row
+`was …` diff against the one before. Verified in the browser by `scripts/repro-live-ui.ts`, which
+counts the fixture pages the scraper is served: 0 during a re-judge.
+
+**The questions got 44% cheaper on 2026-09-24.** The listing's facts paragraph is no longer repeated
+in all six questions; the state carries it once (`docs/.../2026-09-18-jevbrowser-design.md` §8.3,
+CLAUDE.md rules 11b and 16). Same 20 listings, same six questions: 56,186 → 31,522 input tokens,
+$0.00236 → $0.00132, 120/120 answers, no gate decision changed. A batch now sits at ~49% of the 64k
+context instead of 88%, so `batchSize: 10` has room to grow — and the old rule 11b guess ("the
+duplication is removable, probe before believing it") has been probed.
+
+A run judges as part of the run, so it needs `TYPESAFE_API_KEY`: the client is built before the
 first page load, so a missing key fails the run in the first second rather than after spending eBay
 page loads on listings it could never judge. A 28-survivor run costs roughly $0.0015.
 
-Stages 0–5 complete (Stage 5 = JEV judgments). 211 tests passing, typecheck clean.
+334 tests passing, typecheck clean on both projects. The last full end-to-end run was 2026-09-23
+(run 8: 85 cards, 20 survivors judged, $0.00238).
+
+**The report's copy is pure functions now.** `web/src/lib/reportText.ts` owns what an empty table
+says and how many rows a count refers to, because the empty table has three different reasons and
+they were sharing one sentence. `score.ts`'s `allWeightsZero` is the only state that means "your
+weights are all zero" — a run that has simply not been judged yet is not it.
 
 Scraping is verified working: 113 listings from a 2-page run, prices parsed 113/113, URLs valid.
 Shipping is parsed correctly since 2026-09-21 — before that fix it stored the item price as the

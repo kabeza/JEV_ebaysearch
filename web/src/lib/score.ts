@@ -155,6 +155,12 @@ export interface ReportRow {
   matching: boolean
   highlighted: boolean
   missing: WeightedSignal[]
+  /**
+   * Signals this listing has a value for, whose weight is zero — so they are not
+   * in the blend either, for a reason the reader chose rather than a silence JEV
+   * kept. Kept apart from `missing` because the two need different sentences.
+   */
+  zeroWeight: WeightedSignal[]
   trust: SellerTrust
   /**
    * Why this row is not in the matching list, in words, or null when it is.
@@ -173,7 +179,13 @@ export interface Report {
   matchingCount: number
   pendingCount: number
   discardedCount: number
-  blendAvailable: boolean
+  /**
+   * Every weight is at zero, so no row can have a blend — the one state where
+   * saying so is news. It is deliberately not "no row has a blend yet": that is
+   * simply what a run looks like before its first answer arrives, and a banner
+   * for it told every reader their weights were zero when they were not.
+   */
+  allWeightsZero: boolean
 }
 
 function answersOf(judgments: Judgment[]): Map<number, Record<string, JevAnswer>> {
@@ -312,6 +324,9 @@ export function buildReport(
     const judged = Object.keys(answers).length > 0
     const { gates, values } = signalsFor(listing, answers, shippingScale, feedbackValues)
     const missing = WEIGHTED_SIGNALS.filter((signal) => values[signal] === null)
+    const zeroWeight = WEIGHTED_SIGNALS.filter(
+      (signal) => values[signal] !== null && settings.weights[signal] <= 0,
+    )
     const passesGates = GATE_SIGNALS.every(
       (signal) => gates[signal] !== null && gates[signal]! >= settings.gates[signal],
     )
@@ -333,6 +348,7 @@ export function buildReport(
       matching,
       highlighted: matching && blend !== null && blend >= settings.highlightThreshold,
       missing,
+      zeroWeight,
       trust: sellerTrust(feedbackOf(listing)),
       discardReason: judged && !matching ? reasonFor(gates, blend, settings) : null,
     }
@@ -347,9 +363,7 @@ export function buildReport(
     .filter((row) => !row.matching)
     .sort((a, b) => compare(a, b, settings.sort))
 
-  const blendAvailable = WEIGHTED_SIGNALS.some(
-    (signal) => settings.weights[signal] > 0 && rows.some((row) => row.values[signal] !== null),
-  )
+  const allWeightsZero = WEIGHTED_SIGNALS.every((signal) => settings.weights[signal] <= 0)
 
   return {
     matching: matching.slice(0, settings.maxRows),
@@ -358,6 +372,6 @@ export function buildReport(
     matchingCount: matching.length,
     pendingCount: pending.length,
     discardedCount: discarded.length,
-    blendAvailable,
+    allWeightsZero,
   }
 }

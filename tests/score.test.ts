@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   DEFAULT_SETTINGS,
   PAID_SHIPPING_CEILING,
+  WEIGHTED_SIGNALS,
   buildReport,
   feedbackRank,
   normaliseAnswer,
@@ -144,6 +145,8 @@ function judged(id: number, over: Partial<Record<string, JevAnswer>> = {}): Judg
   }
   return Object.entries(answers).map(([questionKey, answer], i) => ({
     id: id * 100 + i,
+    // One version: this file is about ranking, not about versions.
+    questionnaireId: 1,
     listingId: id,
     questionKey,
     answer,
@@ -152,6 +155,11 @@ function judged(id: number, over: Partial<Record<string, JevAnswer>> = {}): Judg
 
 function settings(over: Partial<ReportSettings> = {}): ReportSettings {
   return { ...DEFAULT_SETTINGS, ...over }
+}
+
+/** Every weight at zero, typed as the settings field expects. */
+function allZero(): ReportSettings['weights'] {
+  return Object.fromEntries(WEIGHTED_SIGNALS.map((signal) => [signal, 0])) as ReportSettings['weights']
 }
 
 describe('buildReport gates', () => {
@@ -212,21 +220,43 @@ describe('buildReport blend', () => {
   })
 
   it('has no blend at all when every weight is zero', () => {
-    const zero = Object.fromEntries(
-      [
-        'spec_match',
-        'price_value',
-        'listing_trust',
-        'criteria_freeform',
-        'seller_feedback',
-        'shipping',
-      ].map((k) => [k, 0]),
-    ) as Record<string, number>
-    const report = buildReport([listing({ id: 1 })], judged(1), settings({ weights: zero as never }))
-    expect(report.blendAvailable).toBe(false)
+    const report = buildReport([listing({ id: 1 })], judged(1), settings({ weights: allZero() }))
     expect(report.matching[0]!.blend).toBeNull()
     // Unranked is not discarded: a row must not vanish for a reason nobody set.
     expect(report.discarded).toHaveLength(0)
+  })
+
+  it('reports every weight as zero only when every weight is zero', () => {
+    const zero = buildReport([listing({ id: 1 })], judged(1), settings({ weights: allZero() }))
+    expect(zero.allWeightsZero).toBe(true)
+
+    const defaults = buildReport([listing({ id: 1 })], judged(1), settings())
+    expect(defaults.allWeightsZero).toBe(false)
+  })
+
+  it('does not call the weights zero when there is simply nothing to blend yet', () => {
+    // The banner used to fire here — at the start of every run, before the first
+    // answer arrives — telling the reader their weights were zero when they were
+    // not. Two different states were sharing one flag.
+    const report = buildReport([listing({ id: 1 })], [], settings())
+    expect(report.matching).toHaveLength(0)
+    expect(report.pending).toHaveLength(1)
+    expect(report.allWeightsZero).toBe(false)
+  })
+
+  it('names the signals kept out of a blend by a zero weight', () => {
+    // A signal with a value is still not in the blend when its weight is zero,
+    // and the row's note used to say only "no answer for" — so a reader could not
+    // tell an answer that was never given from one they had just switched off.
+    const report = buildReport(
+      [listing({ id: 1 })],
+      judged(1),
+      settings({ weights: { ...DEFAULT_SETTINGS.weights, shipping: 0 } }),
+    )
+    const row = report.matching[0] ?? report.discarded[0]!
+    expect(row.values.shipping).not.toBeNull()
+    expect(row.missing).not.toContain('shipping')
+    expect(row.zeroWeight).toEqual(['shipping'])
   })
 
   it('honours the weights it is given', () => {

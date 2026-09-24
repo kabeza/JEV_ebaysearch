@@ -5,11 +5,18 @@ import { createRun, getRun } from '../src/storage/runs'
 import { insertCards, listListings } from '../src/storage/listings'
 import { listJudgments, listQuestionnaires } from '../src/storage/judgments'
 import { listEvents } from '../src/storage/events'
-import { judgeSurvivors } from '../src/pipeline/judge'
+import { askInBatches, judgeSurvivors } from '../src/pipeline/judge'
 import { createFakeJevClient, type JevAnswer, type JevResult } from '../src/jev/client'
-import { QUESTION_KEYS, type SearchRequest } from '../src/jev/questions'
+import {
+  QUESTION_KEYS,
+  buildFromDraft,
+  buildState,
+  type QuestionListing,
+  type SearchRequest,
+} from '../src/jev/questions'
 import type { JevRequest } from '../src/jev/client'
 import type { RawCard } from '../src/scraper/cards'
+import { defaultDraft } from '../src/jev/draft'
 
 const request: SearchRequest = {
   keyword: 'thinkpad',
@@ -329,5 +336,205 @@ describe('judgeSurvivors and failed detail pages', () => {
     const failed = listListings(db, run.id).find((l) => l.id === first!.id)
     expect(failed?.stage).toBe('judged')
     expect(listJudgments(db, run.id).filter((j) => j.listingId === first!.id)).toHaveLength(6)
+  })
+})
+
+describe('askInBatches', () => {
+  const labelled = [1, 2, 3, 4].map((i) => ({
+    label: `L${i}`,
+    title: `Listing ${i}`,
+    price: 100 * i,
+    shipping: 0,
+    conditionLabel: 'Open Box',
+    sellerName: 'seller',
+    sellerFeedback: '100% positive (45)',
+    detail: null,
+  }))
+  const listingIds = [101, 102, 103, 104]
+  const draft = defaultDraft({
+    keyword: 'k',
+    criteria_text: 'c',
+    spec: {},
+    max_price: undefined,
+    accepted_conditions: ['Open Box'],
+  })
+  const questionsFor = (batch: QuestionListing[]) => ({
+    state: buildState(draft.request, batch),
+    questions: buildFromDraft(draft, batch),
+  })
+
+  /** Every answer for the questions asked, so a batch always comes back complete. */
+  const completeAnswers = (questions: Record<string, unknown>) =>
+    Object.fromEntries(
+      Object.keys(questions).map((key) => [
+        key,
+        key.includes('listing_trust') || key.includes('price_value')
+          ? {
+              type: 'score',
+              score: 3,
+              confidence: 0.5,
+              legend: { '0': 'a', '4': 'e' },
+              probabilities: { '0': 0.1, '4': 0.9 },
+            }
+          : { type: 'noul', noul: 0.9 },
+      ]),
+    )
+
+  it('asks one call per batch and hands each batch’s answers back with its listing', async () => {
+    const calls: number[] = []
+    const client = {
+      systemOne: async ({ questions }: { questions: Record<string, unknown> }) => {
+        const labels = new Set(Object.keys(questions).map((k) => k.split('.')[0]))
+        calls.push(labels.size)
+        return {
+          model: 'fake',
+          answers: completeAnswers(questions),
+          usage: { input_tokens: 100, output_tokens: 0 },
+        }
+      },
+    } as never
+
+    const stored: { label: string; id: number; keys: number }[] = []
+    const outcome = await askInBatches({
+      client,
+      batchSize: 2,
+      emit: () => {},
+      labelled,
+      listingIds,
+      questionKeys: [...QUESTION_KEYS],
+      questionsFor,
+      onBatch: (results) => {
+        for (const r of results) {
+          stored.push({ label: r.listing.label, id: r.listingId, keys: Object.keys(r.answers).length })
+        }
+      },
+    })
+
+    expect(calls).toEqual([2, 2])
+    expect(outcome.batches).toBe(2)
+    expect(outcome.judged).toBe(4)
+    expect(stored).toEqual([
+      { label: 'L1', id: 101, keys: 6 },
+      { label: 'L2', id: 102, keys: 6 },
+      { label: 'L3', id: 103, keys: 6 },
+      { label: 'L4', id: 104, keys: 6 },
+    ])
+  })
+
+  it('halves the batch on a refusal and stays halved for the job', async () => {
+    const sizes: number[] = []
+    const client = {
+      systemOne: async ({ questions }: { questions: Record<string, unknown> }) => {
+        const labels = new Set(Object.keys(questions).map((k) => k.split('.')[0]))
+        sizes.push(labels.size)
+        if (labels.size > 1) throw new Error('422: request too large')
+        return {
+          model: 'fake',
+          answers: Object.fromEntries(
+            [...labels].map((label) => [`${label}.condition_ok`, { type: 'noul', noul: 0.9 }]),
+          ),
+          usage: { input_tokens: 10, output_tokens: 0 },
+        }
+      },
+    } as never
+
+    const outcome = await askInBatches({
+      client,
+      batchSize: 2,
+      emit: () => {},
+      labelled,
+      listingIds,
+      questionKeys: ['condition_ok'],
+      questionsFor,
+      onBatch: () => {},
+    })
+
+    expect(sizes).toEqual([2, 1, 1, 1, 1])
+    expect(outcome.batches).toBe(4)
+    expect(outcome.judged).toBe(4)
+  })
+
+  it('counts an answer JEV did not return instead of pretending it arrived', async () => {
+    const client = {
+      systemOne: async () => ({
+        model: 'fake',
+        answers: { 'L1.condition_ok': { type: 'noul', noul: 0.9 } },
+        usage: { input_tokens: 10, output_tokens: 0 },
+      }),
+    } as never
+
+    const outcome = await askInBatches({
+      client,
+      batchSize: 1,
+      emit: () => {},
+      labelled: labelled.slice(0, 1),
+      listingIds: listingIds.slice(0, 1),
+      questionKeys: ['condition_ok', 'price_value'],
+      questionsFor,
+      onBatch: () => {},
+    })
+
+    expect(outcome.missingAnswers).toBe(1)
+  })
+
+  it('stops between batches when cancelled, keeping what arrived', async () => {
+    let batches = 0
+    const client = {
+      systemOne: async ({ questions }: { questions: Record<string, unknown> }) => {
+        batches++
+        return {
+          model: 'fake',
+          answers: completeAnswers(questions),
+          usage: { input_tokens: 10, output_tokens: 0 },
+        }
+      },
+    } as never
+
+    const outcome = await askInBatches({
+      client,
+      batchSize: 2,
+      emit: () => {},
+      labelled,
+      listingIds,
+      questionKeys: ['condition_ok'],
+      isCancelled: () => batches >= 1,
+      questionsFor,
+      onBatch: () => {},
+    })
+
+    expect(batches).toBe(1)
+    expect(outcome.cancelled).toBe(true)
+    expect(outcome.judged).toBe(2)
+  })
+})
+
+describe('the questionnaire a run stores', () => {
+  it('holds the questions it asked, with the label each listing was given', () => {
+    // §5.7 promises "the exact question definitions used". Storing only
+    // `{request, questionKeys}` broke that promise for the whole first-judging
+    // path: the wording lived in code, so a later edit to it would silently
+    // rewrite what an old run claims to have asked.
+    const { db, run } = setup(2)
+    return judgeSurvivors({
+      db,
+      runId: run.id,
+      request,
+      client: answeringClient() as never,
+      batchSize: 10,
+      emit: () => {},
+    }).then(() => {
+      const [questionnaire] = listQuestionnaires(db, run.id)
+      const definition = questionnaire!.definition as {
+        questions: { key: string; instructions: string }[]
+        labels: Record<string, string>
+      }
+      expect(definition.questions.map((q) => q.key)).toEqual([...QUESTION_KEYS])
+      for (const question of definition.questions) {
+        expect(question.instructions.trim().length).toBeGreaterThan(0)
+      }
+      const listings = listListings(db, run.id)
+      expect(definition.labels[String(listings[0]!.id)]).toBe('L1')
+      expect(definition.labels[String(listings[1]!.id)]).toBe('L2')
+    })
   })
 })

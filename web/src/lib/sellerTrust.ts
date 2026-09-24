@@ -62,3 +62,16 @@ export function sellerTrust(raw: string | null | undefined): SellerTrust {
       : 'flawless_new'
   return { raw: raw ?? null, pct: parsed.pct, count: parsed.count, tier }
 }
+
+/**
+ * The row's feedback cell when no badge carries the record, and null when one
+ * does. The count is shown in every tier (spec §6) for the same reason the badge
+ * shows it: 99.1% of 17,000 and 99.1% of 3 are not the same seller.
+ */
+export function trustRowText(trust: SellerTrust): string | null {
+  if (trust.tier !== 'not_marked') return null
+  if (trust.pct === null) return '—'
+  return trust.count === null
+    ? `${trust.pct}%`
+    : `${trust.pct}% · ${trust.count.toLocaleString('en-US')}`
+}

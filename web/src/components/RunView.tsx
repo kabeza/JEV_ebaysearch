@@ -5,8 +5,10 @@ import {
   type JevAnswer,
   type Judgment,
   type Listing,
+  type Questionnaire,
   type Run,
   type RunEvent,
+  type Search,
 } from '../lib/api'
 import { summariseSpec } from '../lib/spec'
 import {
@@ -16,13 +18,23 @@ import {
   type SortColumn,
 } from '../lib/score'
 import { download, toCsv, toJson } from '../lib/export'
+import { rowsToExport, visibleCount } from '../lib/reportText'
+import {
+  answersByListing,
+  judgmentsForVersion,
+  previousVersionOf,
+  selectVersion,
+} from '../lib/versions'
+import { VersionSelector } from './VersionSelector'
+import { QuestionEditor } from './QuestionEditor'
+import { DEFAULT_ACCEPTED_CONDITIONS, type SearchRequest } from '../../../src/jev/questions'
 import { WeightControls } from './WeightControls'
 import { ReportTable } from './ReportTable'
 
 interface Props {
   runId: number
-  /** The search's requirements, so the view can say what the filter was asked to do. */
-  spec: Record<string, unknown>
+  /** The search this run belongs to: its requirements, and what the editor starts from. */
+  search: Search
   onClose: () => void
 }
 
@@ -30,12 +42,18 @@ function money(v: number | null): string {
   return v === null ? '—' : `$${v.toFixed(2)}`
 }
 
-export default function RunView({ runId, spec, onClose }: Props) {
+export default function RunView({ runId, search, onClose }: Props) {
+  const spec = search.spec
   const [run, setRun] = useState<Run | null>(null)
   const [listings, setListings] = useState<Listing[]>([])
   const [events, setEvents] = useState<RunEvent[]>([])
   const [judgments, setJudgments] = useState<Judgment[]>([])
+  const [questionnaires, setQuestionnaires] = useState<Questionnaire[]>([])
+  // Which version's answers the report shows. Ranking is local state, like the
+  // weights: nothing here talks to the server.
+  const [questionnaireId, setQuestionnaireId] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [editing, setEditing] = useState(false)
   // Ranking is local state: no URL, no server, no persistence. A reload returns
   // to the defaults in `DEFAULT_SETTINGS` (spec §5.6).
   const [settings, setSettings] = useState<ReportSettings>(DEFAULT_SETTINGS)
@@ -49,6 +67,7 @@ export default function RunView({ runId, spec, onClose }: Props) {
         setRun(d.run)
         setListings(d.listings)
         setJudgments(d.judgments)
+        setQuestionnaires(d.questionnaires)
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
 
@@ -63,6 +82,7 @@ export default function RunView({ runId, spec, onClose }: Props) {
           setListings(d.listings)
           setRun(d.run)
           setJudgments(d.judgments)
+          setQuestionnaires(d.questionnaires)
         })
         .catch(() => {
           /* the next event will try again */
@@ -95,6 +115,11 @@ export default function RunView({ runId, spec, onClose }: Props) {
       'cards.filtered',
       // Answers arrive per batch; each one changes what the table can show.
       'judgments.received',
+      // A re-judge is a second judging of the same run: its events carry the new
+      // version's answers, so the view refreshes exactly as it does for a run.
+      'rejudge.started',
+      'rejudge.finished',
+      'rejudge.failed',
     ]
     for (const type of generic) {
       source.addEventListener(type, (e) => {
@@ -104,6 +129,7 @@ export default function RunView({ runId, spec, onClose }: Props) {
         // page is fetched, so run.finished is the only signal that it is done.
         if (
           type.startsWith('run.') ||
+          type.startsWith('rejudge.') ||
           type === 'error' ||
           type === 'listing.visited' ||
           type === 'judgments.received'
@@ -137,18 +163,47 @@ export default function RunView({ runId, spec, onClose }: Props) {
   const survivors = listings.filter((l) => l.stage !== 'rejected')
   const rejected = listings.filter((l) => l.stage === 'rejected')
   const requirements = summariseSpec(spec)
+
+  // The newest version is what the last judging produced, and an ordinary run has
+  // exactly one. `answersOf` in score.ts keys answers by listing and question, so
+  // handing it every version's judgments would mix them silently — and a selection
+  // left over from another run must fall back rather than filter to nothing.
+  const selected = selectVersion(questionnaires, questionnaireId)
+  const selectedRows = useMemo(
+    () => (selected === null ? judgments : judgmentsForVersion(judgments, selected)),
+    [judgments, selected],
+  )
+  const previous = selected === null ? null : previousVersionOf(questionnaires, selected)
+  const previousAnswers = useMemo(
+    () => (previous ? answersByListing(judgmentsForVersion(judgments, previous.id)) : undefined),
+    [judgments, previous],
+  )
+  const selectedVersion = questionnaires.find((q) => q.id === selected)?.version
   // The report is a pure function of what the page already has. That is the
   // whole reason a control can re-sort it without a request (spec §5.6).
   const report = useMemo(
-    () => buildReport(survivors, judgments, settings),
-    [listings, judgments, settings],
+    () => buildReport(survivors, selectedRows, settings),
+    [listings, selectedRows, settings],
   )
 
-  // Export writes what the table is showing: the matching rows and, when the
-  // discarded toggle is on, the discarded ones too (spec §7).
-  const exported = settings.showDiscarded
-    ? [...report.matching, ...report.discarded]
-    : report.matching
+  // Export writes what the table is showing — the matching rows, the ones still
+  // waiting to be judged (they are on screen, and their status column says so),
+  // and the discarded ones when the toggle is on (spec §7).
+  const exported = rowsToExport(report, settings.showDiscarded)
+
+  // What the questions are asked against, as the server's `SearchRequest`: the
+  // draft's buyer-side half. A search created before Stage 7 has no spec, so this
+  // is where the editor can finally fill one in.
+  const fallbackRequest: SearchRequest = useMemo(
+    () => ({
+      keyword: search.keyword,
+      criteria_text: search.criteriaText,
+      spec: search.spec,
+      max_price: typeof search.spec?.max_price === 'number' ? search.spec.max_price : undefined,
+      accepted_conditions: DEFAULT_ACCEPTED_CONDITIONS,
+    }),
+    [search],
+  )
 
   const sortBy = (column: SortColumn) => {
     setSettings((current) => ({
@@ -185,6 +240,19 @@ export default function RunView({ runId, spec, onClose }: Props) {
           </p>
         </div>
         <div className="flex gap-2">
+          {finished && survivors.length > 0 && (
+            <button
+              onClick={() => setEditing((current) => !current)}
+              className="rounded border border-almond-silk/60 px-3 py-1.5 text-sm text-almond-silk"
+            >
+              Edit questions
+            </button>
+          )}
+          <VersionSelector
+            questionnaires={questionnaires}
+            selected={selected}
+            onSelect={setQuestionnaireId}
+          />
           {!finished && (
             <button
               onClick={() => void cancelRun(runId)}
@@ -194,7 +262,9 @@ export default function RunView({ runId, spec, onClose }: Props) {
             </button>
           )}
           <button
-            onClick={() => download(`run-${runId}-report.csv`, toCsv(exported), 'text/csv')}
+            onClick={() =>
+              download(`run-${runId}-report.csv`, toCsv(exported, selectedVersion), 'text/csv')
+            }
             className="rounded border border-almond-silk/60 px-3 py-1.5 text-sm text-almond-silk"
           >
             Export CSV ({exported.length})
@@ -214,6 +284,20 @@ export default function RunView({ runId, spec, onClose }: Props) {
         </div>
       </header>
 
+      {editing && (
+        <QuestionEditor
+          // Keyed on the version: opening the editor from another version must
+          // prefill from that version's stored questions, not the last edit.
+          key={selected ?? 'none'}
+          runId={runId}
+          version={selectedVersion ?? null}
+          definition={questionnaires.find((q) => q.id === selected)?.definition ?? null}
+          fallbackRequest={fallbackRequest}
+          onStarted={() => setEditing(false)}
+          onClose={() => setEditing(false)}
+        />
+      )}
+
       {run?.error && (
         <p className="mb-4 rounded border border-almond-silk/50 bg-dusty-grape/40 p-3 text-sm text-almond-silk">
           {run.error}
@@ -227,7 +311,9 @@ export default function RunView({ runId, spec, onClose }: Props) {
         onReset={() => setSettings(DEFAULT_SETTINGS)}
         counts={{
           matching: report.matchingCount,
-          discarded: report.discardedCount,
+          // What the table will actually render, so the label cannot promise more
+          // rows than the row limit lets through.
+          discarded: visibleCount(report.discardedCount, settings.maxRows),
           pending: report.pendingCount,
         }}
       />
@@ -236,6 +322,8 @@ export default function RunView({ runId, spec, onClose }: Props) {
         <ReportTable
           report={report}
           settings={settings}
+          rejectedCount={rejected.length}
+          previousAnswers={previousAnswers}
           onSort={sortBy}
           onToggleDiscarded={(show) => setSettings((current) => ({ ...current, showDiscarded: show }))}
         />

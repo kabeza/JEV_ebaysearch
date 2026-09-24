@@ -34,9 +34,9 @@ export default function App() {
   const [criteriaText, setCriteriaText] = useState('')
   const [specForm, setSpecForm] = useState<SpecFormValues>(EMPTY_SPEC_FORM)
   const [error, setError] = useState<string | null>(null)
-  const [activeRun, setActiveRun] = useState<{ id: number; spec: Record<string, unknown> } | null>(
-    null,
-  )
+  // The whole search, not just its spec: the question editor edits the buyer's
+  // criteria, so it needs the keyword and the criteria text as well.
+  const [activeRun, setActiveRun] = useState<Search | null>(null)
 
   async function refresh() {
     try {
@@ -172,7 +172,7 @@ export default function App() {
                         setError(null)
                         try {
                           const { runId } = await startRun(s.id)
-                          setActiveRun({ id: runId, spec: s.spec ?? {} })
+                          setActiveRun({ ...s, id: runId })
                         } catch (err) {
                           setError(err instanceof Error ? err.message : String(err))
                         }
@@ -202,11 +202,7 @@ export default function App() {
       </section>
 
       {activeRun !== null && (
-        <RunView
-          runId={activeRun.id}
-          spec={activeRun.spec}
-          onClose={() => setActiveRun(null)}
-        />
+        <RunView runId={activeRun.id} search={activeRun} onClose={() => setActiveRun(null)} />
       )}
     </main>
   )

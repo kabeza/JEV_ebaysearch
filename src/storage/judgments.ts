@@ -44,11 +44,24 @@ interface JudgmentRow {
   created_at: string
 }
 
+/** The next version number for a run's questionnaires, starting at 1. */
+export function nextQuestionnaireVersion(db: SqliteDatabase, runId: number): number {
+  const row = db
+    .prepare('select coalesce(max(version), 0) + 1 as next from questionnaires where run_id = ?')
+    .get(runId) as { next: number }
+  return row.next
+}
+
+/**
+ * Stores one version's definition. `version` is explicit and required: a
+ * re-judge is a new version of the same run, and a defaulted 1 would make every
+ * version collide on the first number (spec §5.7).
+ */
 export function saveQuestionnaire(
   db: SqliteDatabase,
   runId: number,
   definition: Record<string, unknown>,
-  version = 1,
+  version: number,
 ): number {
   const info = db
     .prepare('insert into questionnaires (run_id, definition_json, version) values (?, ?, ?)')
@@ -97,6 +110,12 @@ export function saveJudgments(
   return entries.length
 }
 
+/**
+ * Every judgment for a run, across **every** questionnaire version, ordered by
+ * id. Callers that rank or display answers must filter to one version first:
+ * `score.ts` keys answers by listing and question, so two versions of the same
+ * answer would overwrite each other silently.
+ */
 export function listJudgments(db: SqliteDatabase, runId: number): Judgment[] {
   const rows = db
     .prepare('select * from judgments where run_id = ? order by id')

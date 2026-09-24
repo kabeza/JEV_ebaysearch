@@ -16,6 +16,9 @@ export type RunEventType =
   | 'cards.filtered'
   | 'listing.visited'
   | 'judgments.received'
+  | 'rejudge.started'
+  | 'rejudge.finished'
+  | 'rejudge.failed'
   | 'error'
 
 export interface RunEvent {

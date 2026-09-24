@@ -24,6 +24,7 @@ export const CSV_COLUMNS = [
   'blend',
   'highlighted',
   'status',
+  'questionnaire',
 ] as const
 
 function cell(value: string | number | boolean | null | undefined): string {
@@ -36,7 +37,19 @@ function number(value: number | null): string {
   return value === null ? '' : value.toFixed(4)
 }
 
-export function toCsv(rows: ReportRow[]): string {
+/** The three states a row can be in, in the file's own words. */
+export type ExportStatus = 'matching' | 'discarded' | 'not judged yet'
+
+/**
+ * Which state a row is in. A row with no answers is neither matched nor
+ * discarded — it is waiting — and it reaches the file because it is on screen.
+ */
+export function rowStatus(row: ReportRow): ExportStatus {
+  if (Object.keys(row.answers).length === 0) return 'not judged yet'
+  return row.matching ? 'matching' : 'discarded'
+}
+
+export function toCsv(rows: ReportRow[], questionnaireVersion?: number): string {
   const lines = [CSV_COLUMNS.join(',')]
   for (const row of rows) {
     // Every field is escaped exactly once, by the `cell` at the end: escaping a
@@ -54,7 +67,10 @@ export function toCsv(rows: ReportRow[]): string {
         ...WEIGHTED_SIGNALS.map((signal) => number(row.values[signal])),
         number(row.blend),
         row.highlighted,
-        row.matching ? 'matching' : 'discarded',
+        rowStatus(row),
+        // Which question set produced this file. A run can carry several
+        // versions, so a report without it cannot be reproduced (spec §7).
+        questionnaireVersion ?? '',
       ]
         .map(cell)
         .join(','),

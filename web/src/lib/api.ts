@@ -83,6 +83,21 @@ export function startRun(searchId: number): Promise<{ runId: number }> {
   })
 }
 
+/**
+ * Re-asks a stored run's questions under an edited set. No page load and no
+ * scrape: the listings and their item specifics are already stored.
+ */
+export function rejudge(
+  runId: number,
+  draft: Record<string, unknown>,
+): Promise<{ runId: number; version: number }> {
+  return request<{ runId: number; version: number }>(`/api/runs/${runId}/rejudge`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(draft),
+  })
+}
+
 export function cancelRun(runId: number): Promise<{ cancelled: boolean }> {
   return request<{ cancelled: boolean }>(`/api/runs/${runId}/cancel`, { method: 'POST' })
 }
@@ -105,15 +120,33 @@ export interface JevAnswer {
 
 export interface Judgment {
   id: number
+  /** Which questionnaire version answered this. A run can carry several. */
+  questionnaireId: number
   listingId: number
   questionKey: string
   answer: JevAnswer
 }
 
-export function getRun(
-  runId: number,
-): Promise<{ run: Run; listings: Listing[]; judgments: Judgment[] }> {
-  return request<{ run: Run; listings: Listing[]; judgments: Judgment[] }>(`/api/runs/${runId}`)
+/** One stored version of a run's questions, and the answers it produced. */
+export interface Questionnaire {
+  id: number
+  version: number
+  createdAt: string
+  definition: Record<string, unknown>
+}
+
+export function getRun(runId: number): Promise<{
+  run: Run
+  listings: Listing[]
+  judgments: Judgment[]
+  questionnaires: Questionnaire[]
+}> {
+  return request<{
+    run: Run
+    listings: Listing[]
+    judgments: Judgment[]
+    questionnaires: Questionnaire[]
+  }>(`/api/runs/${runId}`)
 }
 
 export interface RunEvent {

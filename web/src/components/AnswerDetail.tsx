@@ -6,7 +6,7 @@ import {
   summariseAnswer,
   type ListingAnswer,
 } from '../lib/answers'
-import type { Listing } from '../lib/api'
+import type { JevAnswer, Listing } from '../lib/api'
 
 /**
  * What JEV answered about one listing.
@@ -20,7 +20,14 @@ import type { Listing } from '../lib/api'
  * deliberately untouched: it already tells a noul (0…1) apart from a score
  * (0…n-1) and flags the fence with `isUncertain` rather than with `confidence`.
  */
-export function Answers({ answers }: { answers: ListingAnswer[] }) {
+export function Answers({
+  answers,
+  previous,
+}: {
+  answers: ListingAnswer[]
+  /** The previous version's answers for this listing, when there is one. */
+  previous?: Record<string, JevAnswer>
+}) {
   if (answers.length === 0) {
     return <p className="text-sm text-lilac-ash/60">No answers for this listing yet.</p>
   }
@@ -44,6 +51,13 @@ export function Answers({ answers }: { answers: ListingAnswer[] }) {
               </span>
             )}
             {level && <span className="text-xs text-lilac-ash/80">{level}</span>}
+            {/* What the version before this one said, on the same line, through
+                the same formatter — so the two cannot read differently. */}
+            {previous?.[questionKey] && (
+              <span className="text-xs text-lilac-ash/50">
+                was {summariseAnswer(previous[questionKey])}
+              </span>
+            )}
           </li>
         )
       })}
@@ -61,16 +75,18 @@ export function Answers({ answers }: { answers: ListingAnswer[] }) {
 export function ListingDetailPanel({
   listing,
   answers,
+  previous,
 }: {
   listing: Listing
   answers: ListingAnswer[]
+  previous?: Record<string, JevAnswer>
 }) {
   const detail = listing.detail
   const entries = detail ? Object.entries(detail.specifics) : []
 
   return (
     <div className="space-y-3 text-sm">
-      <Answers answers={answers} />
+      <Answers answers={answers} previous={previous} />
 
       {!detail ? (
         <p className="text-lilac-ash/70">

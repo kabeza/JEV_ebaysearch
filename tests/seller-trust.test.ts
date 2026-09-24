@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { parseSellerFeedback, sellerTrust, TRUSTED_MIN_COUNT } from '../web/src/lib/sellerTrust'
+import {
+  TRUSTED_MIN_COUNT,
+  parseSellerFeedback,
+  sellerTrust,
+  trustRowText,
+} from '../web/src/lib/sellerTrust'
 
 describe('parseSellerFeedback', () => {
   it('reads the percentage and a thousands-suffixed count', () => {
@@ -54,5 +59,28 @@ describe('sellerTrust', () => {
       tier: 'not_marked',
     })
     expect(sellerTrust(null)).toEqual({ raw: null, pct: null, count: null, tier: 'not_marked' })
+  })
+})
+
+describe('trustRowText', () => {
+  it('shows the count in the tier with no badge, as spec §6 says it always does', () => {
+    // The count is what tells 99.1% of 17,000 apart from 99.1% of 3 — and this is
+    // the tier where the percentage is worst, so it is the last place to drop it.
+    expect(trustRowText(sellerTrust('99.1% positive (17K)'))).toBe('99.1% · 17,000')
+    expect(trustRowText(sellerTrust('97.1% positive (1.2M)'))).toBe('97.1% · 1,200,000')
+  })
+
+  it('leaves a badged seller to the badge, which already carries the count', () => {
+    expect(trustRowText(sellerTrust('100% positive (17K)'))).toBeNull()
+    expect(trustRowText(sellerTrust('100% positive (45)'))).toBeNull()
+  })
+
+  it('keeps a percentage with no count to pair it with, and says nothing where there is nothing', () => {
+    // Built by hand: the parser drops the whole string when the count will not
+    // read, so this branch is defensive — a percentage with no count is still
+    // more than a dash.
+    expect(trustRowText({ raw: 'x', pct: 99.1, count: null, tier: 'not_marked' })).toBe('99.1%')
+    expect(trustRowText(sellerTrust('PowerSeller'))).toBe('—')
+    expect(trustRowText(sellerTrust(null))).toBe('—')
   })
 })
