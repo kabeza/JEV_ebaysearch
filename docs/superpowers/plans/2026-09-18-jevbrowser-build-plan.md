@@ -20,6 +20,8 @@ Copied verbatim from the spec. Every task's requirements implicitly include this
 - **Node 20+ required** (`@typesafe-ai/sdk` demands it; the machine has 22.18.0).
 - **The JEV API key never reaches the browser.** It is read from `TYPESAFE_API_KEY` server-side only.
 - **Run defaults:** 25 result pages, 10 minutes, JEV batch size 10, visible browser (`headed: true`).
+  *(The batch size is **25** since 2026-09-25, measured — see "The batch size is measured" below.
+  Every other default stands.)*
 - **Never log in to an eBay account.** Anonymous browsing only.
 - **Never fetch eBay pages in parallel.** Randomized 1.5–3s delay between page loads.
 - **Default thresholds:** gate thresholds 0.5, weighted match threshold 0.6.
@@ -2004,6 +2006,52 @@ and `item_specifics: null` cannot tell "never opened" from "nothing to say".
 $0.00132. A batch of 20 now sits at ~49% of the 64k context where it sat at 88%, so `batchSize: 10`
 finally has room above it — which was the question this whole thread started from.
 
+## The batch size is measured, and the refusal is not a 422 (2026-09-25)
+
+`batchSize` went 10 → **25**, and the number came from `scripts/probe-batch-size.ts` rather than from
+extrapolation. Two pools, because one was not enough: run 8's 20 listings are the only ones with item
+specifics stored, and 20 listings cannot measure above 20 — so the probe grew a `--pool-repeat` mode
+that fills a larger batch from the same pool and **says in its output how many rows were duplicated**,
+because that is honest for tokens and refusal and worthless for anything about answer quality. The
+second pool is run 7, re-judged first (60 distinct real listings, no detail behind them) so that at
+least one pool was not a repeat.
+
+| Listings with item specifics (run 8, pool repeated) | tokens | of the 64k context |
+|---|---|---|
+| 20 | 31,522 | 49% |
+| 25 | 40,063 | 63% |
+| 30 | 47,792 | 75% |
+| 35 | 55,115 | 86% |
+| 40 | 62,707 | 98% |
+| 45 | **refused** | — |
+
+| Listings with no detail (run 7, 60 distinct) | tokens | of the 64k context |
+|---|---|---|
+| 20 | 26,166 | 41% |
+| 30 | 39,452 | 62% |
+| 40 | 52,620 | 82% |
+| 50 | **refused** | — |
+
+Per listing: **~1,570 tokens** with item specifics, ~1,310 without — the state being ~390 and ~152 of
+it respectively, which the one-question shape confirms. So the limit is the *whole* request against
+the 64k context, not the 32k `state` figure the docs had been quoting: a state of 50 detail-less
+listings is 7,575 tokens, 12% of the context, where the questions on top of it are what overflows.
+25 was chosen over 30 for headroom: a pool of 20 repeated understates how long a real listing's item
+specifics run.
+
+**The finding that mattered more than the number.** The refusal is not a 422. It is a
+`BadRequestError`, `status: 400`, `400 {"detail":{"error_type":"max_tokens_exceeded"}}` — and
+`isTooLargeError` matched only a 422, so a batch that overflowed was **never halved**: it failed the
+run, which is the opposite of what rule 17 promises. The matcher now also recognises the service's own
+marker, and deliberately *not* the bare 400 — a 400 for a malformed question carries no marker, and
+halving for it would walk the batch to 1 and fail there anyway. This is why the measurement had to
+happen before the raise rather than after: raising the size first would have turned a recoverable
+overflow into a dead run, and the failure would have looked like a size limit rather than a missing
+case in a predicate.
+
+Raising the size buys **round trips, not money** — tokens are linear, so the cost per listing is the
+same either way. A 28-survivor run goes from three calls to two. Total probe spend: $0.021.
+
 ## Handoff — state at end of 2026-09-21 (updated 2026-09-24)
 
 **Working and verified:** Stages 0–8 complete.
@@ -2027,9 +2075,18 @@ finally has room above it — which was the question this whole thread started f
    Stage 8 last. There is no next stage in this plan. Stage 8's owed fresh-context review ran on
    2026-09-25 (1 Critical, 5 Important, 7 Minor; all five closed with a test each — see "The
    fresh-context review" in Stage 8). What remains is the standing list below: the sponsored marker,
-   `spec: {}` on every stored search, and a pause that survives a process restart — of which only the
-   unusable-row half has been addressed (`sweepPausedRuns` ends the orphan at server start; nothing
-   continues what it was doing). A `401` still only fails loudly.
+   and a pause that survives a process restart — of which only the unusable-row half has been
+   addressed (`sweepPausedRuns` ends the orphan at server start; nothing continues what it was
+   doing). A `401` still only fails loudly.
+
+   **`spec: {}` is no longer on that list** — closed on 2026-09-25 as a bounded change, with no plan
+   document: `rejudgeRun` writes the buyer's half of the draft back onto the run's search
+   (`updateSearchRequest`, and `specForSearch` to mirror the budget and the accepted conditions into
+   the `spec_json` the readers actually look at). CLAUDE.md rule 27 is the whole record. The five
+   searches that were already empty stay empty until someone re-judges one of their runs — this
+   fixes the write path, not the past. Verified in the browser by `scripts/repro-live-ui.ts`, which
+   now edits the buyer's fields before re-judging and prints the search's spec either side:
+   `{"ram_gb":32,…}` → `{"ram_gb":64,…,"accepted_conditions":["Open Box"]}`.
 
 2. **The sponsored marker is still a known defect.** `.s-card__sep b` is present on every card, so
    it carries no signal — a live run flagged 113 of 113. The field is retained as a raw observation
@@ -2038,8 +2095,9 @@ finally has room above it — which was the question this whole thread started f
 3. **The real end-to-end run happened on 2026-09-23 — see "First real run" above.** It answered the
    prompt-size question in the opposite direction to the guess: the limit is reached from the
    *questions*, not the state. That is now fixed — see "The questions got 44% cheaper" — so a batch
-   of 20 sits at ~49% of the context where it sat at 88%, and `batchSize: 10` has room above it.
-   Raising it is untested: nothing has measured a batch above 20 since the change.
+   of 20 sits at ~49% of the context where it sat at 88%. **Answered on 2026-09-25:** the batch is
+   now 25, measured, and the measurement found that an oversized batch is refused as a 400 rather
+   than a 422 — which the halving rule had never recognised. See "The batch size is measured".
 
 4. **eBay rate-limits by volume.** After roughly 50 page loads in a day, a run returned HTTP 403
    with the standard error page. Detail visits spend the same budget — hence `maxDetailVisits`.

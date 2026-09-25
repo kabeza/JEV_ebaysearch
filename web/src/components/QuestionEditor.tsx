@@ -103,6 +103,11 @@ export function QuestionEditor({
         stored — no page is fetched.
       </p>
 
+      <p className="mb-3 text-xs text-almond-silk/80">
+        The buyer’s half below becomes the search’s own definition when you re-judge: the next fresh
+        run pre-filters on it and asks about it, instead of starting from an empty spec.
+      </p>
+
       <div className="mb-4 grid gap-3 md:grid-cols-2">
         <label className={label}>
           the buyer’s criteria, verbatim

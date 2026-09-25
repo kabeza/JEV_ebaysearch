@@ -17,7 +17,7 @@ it sits near 0.5, edit the questions, and re-judge the same listings without scr
 ## Commands
 
 ```bash
-npm test                  # vitest, 358 tests
+npm test                  # vitest, 372 tests
 npm run typecheck         # tsc on BOTH the server and web projects
 npm run dev:server        # API on 127.0.0.1:3001 (needs .env)
 npm run dev:web           # Vite page on 127.0.0.1:5173
@@ -185,10 +185,19 @@ These were established by probing the live site. Do not replace them with assump
     ones whose listing page failed (`detail_failed`) and ones past `maxDetailVisits` — those are
     judged on card data alone, and the state says so in `listing_page_opened`, because
     `item_specifics: null` cannot distinguish "the page was never opened" from "the page had nothing
-    to say" and only one of those licenses a guess. One call per `batchSize` (default 10) listings; a `422` halves the
-    batch *permanently for the run* (a size refused once will be refused again) down to 1, and a
-    listing still refused fails the run loudly. Cost is a fraction of a cent: two listings with
-    twelve questions measured 3,632 input tokens, $0.00015. **The judge phase selects through
+    to say" and only one of those licenses a guess. One call per `batchSize` listings — **25 since
+    2026-09-25, raised from 10 on measurement** (`scripts/probe-batch-size.ts`): with the questions
+    44% cheaper, a batch of listings carrying item specifics costs ~1,570 tokens each, so 20 listings
+    is 49% of the 64k context, 25 is 63%, 40 is 98%, and 45 is refused. A refusal halves the batch
+    *permanently for the run* (a size refused once will be refused again) down to 1, and a listing
+    still refused fails the run loudly. **What a refusal looks like is not what it says in the docs:**
+    it is a `BadRequestError` — `status: 400`,
+    `400 {"detail":{"error_type":"max_tokens_exceeded"}}` — and `isTooLargeError` originally matched
+    only a `422`, so an oversized batch was never halved and the run died instead. It now matches
+    that marker too, and deliberately not the bare 400: a 400 for a malformed question carries no
+    marker, and halving for it would walk the batch to 1 and fail there anyway. Cost is a fraction of
+    a cent: two listings with twelve questions measured 3,632 input tokens, $0.00015. **The judge
+    phase selects through
     `listToJudge` (`stage in ('survivor', 'detail_failed')`), not `listSurvivors`.** Selecting only
     `'survivor'` looks harmless and strands every failed-page listing as unjudged forever — nothing
     else ever comes back for it, so a finished run shows it as still waiting. It took a review of
@@ -258,6 +267,47 @@ These were established by probing the live site. Do not replace them with assump
     because the editor opens on a run with a final status. Rule 13 makes this easy to hit by
     accident.
 
+27. **A re-judge writes the buyer's half of the draft back onto the search.** Until 2026-09-25 the
+    editor wrote the request into the questionnaire and nowhere else, so **every** stored search had
+    `spec: {}` — which meant a fresh run pre-filtered on nothing and `spec_match` asked JEV about
+    "no particular specification". `rejudgeRun` now calls `updateSearchRequest` (`src/storage/
+    searches.ts`) after the version is stored and before the first JEV call: the request is *data*,
+    complete the moment its version exists, so a judging failure must not leave the newest version
+    and the search disagreeing. It writes `criteria_text`, and a `spec_json` built by `specForSearch`
+    — which **mirrors two fields** and is why it is a function rather than an object literal:
+
+    - `max_price` is stated twice in a `SearchRequest`: at the top level, which the questions quote to
+      JEV, and as `spec.max_price`, which `requirementsFromSpec` turns into the pre-filter rule and
+      `runner.ts` puts in the URL's `_udhi`. The editor edits only the top-level one, so a spec
+      written back without the mirror would leave the pre-filter and the eBay URL ignoring the budget
+      a person just set.
+    - `accepted_conditions` has no column in `searches` and lives in the same bag. `runner.ts` reads
+      them through `acceptedConditionsFrom(spec)` (in `jev/questions.ts`), which falls back to the
+      shipped default when the search has none — and treats an empty or unusable list as none, because
+      `condition_ok` quotes the list verbatim and an empty list is a question with no content.
+
+    The keyword is deliberately not written: the editor does not edit it. Searches stored before this
+    date keep their empty spec until someone re-judges one of their runs.
+
+28. **A signal JEV never answered is worth 0.5 in the blend, not nothing.** `MISSING_AS_NEUTRAL` in
+    `web/src/lib/score.ts`. Until 2026-09-25 a missing signal was dropped and the remaining weights
+    renormalised, which measured that listing over five signals where every other listing was
+    measured over six — so a listing with less known about it was *easier* to score highly. That is
+    an incentive, not just a distortion, and the wrong way round for choosing something to buy. Not
+    zero either: a signal JEV never answered still outranks one it answered "worst possible". A
+    signal switched off by a **zero weight** is a different state and stays out of the average
+    entirely — value and weight both — which is why the weight check precedes the substitution.
+    `blendOf` therefore returns null for exactly one state, every weight at zero.
+
+    **Two things the change did and did not buy, measured on run 8.** The one row with an
+    unparseable seller record went 0.726 → 0.688 and stayed the only matching row: one missing
+    signal out of six moves a blend by little, and that row's other five signals really were strong.
+    The rows printed "below" it in an earlier reading were trackpoint caps with
+    `is_target_product = 0.02` — gate failures, not competitors — so the earlier claim that the
+    unknown "topped the ranking above every complete row" was a misreading of a list that mixed
+    gated-out rows with matching ones. The policy is right; on this data it changed no ordering.
+    Design spec §3.3 of `2026-09-23-stage6-report-design.md` records the reversal and that caveat.
+
 ## Conventions
 
 - **TDD**: write the failing test, run it and watch it fail, implement minimally, watch it pass.
@@ -276,12 +326,25 @@ These were established by probing the live site. Do not replace them with assump
 
 **Resume here (2026-09-25):** **Stages 0–8 are complete — the build plan has no next stage.** Stage 8
 was reviewed by a fresh-context reviewer on 2026-09-25: one Critical and four Important findings, all
-five closed with a test each (rules 25 and 26 hold three of them). What is left is the standing list:
-the sponsored marker (rule 5), `spec: {}` on every stored search (the question editor writes the
-draft's request but not back to `searches`), and the one thing Stage 8 genuinely still leaves out —
-resuming a pause that a process restart ended (the row is now swept to `cancelled` instead of being
-left unusable, but there is still no attempt to continue what it was doing; a `401` still only fails
-loudly).
+five closed with a test each (rules 25 and 26 hold three of them). The `spec: {}` gap closed the same
+day (rule 27): a re-judge now writes the buyer's half back onto the search, so a fresh run
+pre-filters on what the editor confirmed. What is left:
+
+- the **sponsored marker** (rule 5) — stored, not displayed, still no real discriminator;
+- **`spec: {}` on searches stored before 2026-09-25** — rule 27 fixes the write path, not the past:
+  the five empty-spec searches stay empty until someone re-judges one of their runs (run 8's search 6
+  is the only one that ever had a real spec);
+- **resuming a pause a process restart ended** — the row is swept to `cancelled` rather than left
+  unusable, but nothing continues what it was doing, and a `401` still only fails loudly;
+- nothing about the blend: the owner ruled on 2026-09-25 that a missing signal counts as neutral, and
+  rule 28 records what that did and did not change. The standing item about the defaults being worth
+  revisiting is closed — the sliders answer it, and the ranking on run 8 was not a defaults problem.
+
+**`batchSize` is 25 since 2026-09-25, measured rather than guessed**, and the measurement found a bug
+on the way: an oversized batch is refused as a 400 with a `max_tokens_exceeded` marker, which
+`isTooLargeError` did not recognise, so the halving rule 17 promises never ran and the run died
+instead. Cost per listing is linear, so the raise buys round trips (28 survivors: 3 calls → 2), not
+money. Two probe runs, 60 distinct real listings plus run 8's pool repeated: $0.021.
 
 **A run pauses instead of dying since 2026-09-24.** A bot challenge or an exhausted JEV outage waits
 for a person — the browser stays open, the page says `paused`, and Resume continues from the same page
@@ -305,7 +368,7 @@ A run judges as part of the run, so it needs `TYPESAFE_API_KEY`: the client is b
 first page load, so a missing key fails the run in the first second rather than after spending eBay
 page loads on listings it could never judge. A 28-survivor run costs roughly $0.0015.
 
-358 tests passing, typecheck clean on both projects. The last full end-to-end run was 2026-09-23
+372 tests passing, typecheck clean on both projects. The last full end-to-end run was 2026-09-23
 (run 8: 85 cards, 20 survivors judged, $0.00238).
 
 **The report's copy is pure functions now.** `web/src/lib/reportText.ts` owns what an empty table

@@ -7,9 +7,15 @@ import { parseSellerFeedback, sellerTrust, type SellerTrust } from './sellerTrus
  * Two facts drive everything here. A noul answer is a probability on 0…1, while
  * a score answer is a probability-weighted value on the scale of its legend — a
  * five-level answer can read 2.18 — so a score is normalised by its own legend
- * length (CLAUDE.md rule 12). And a missing answer is not a mediocre answer: it
- * is excluded and the remaining weights renormalise, because inventing a 0.5 out
- * of silence is the same mistake `matchCondition` already refuses to make.
+ * length (CLAUDE.md rule 12). And a missing answer is *neutral*: it counts as the
+ * middle of its scale rather than being dropped.
+ *
+ * That second one was the other way round until 2026-09-25, on the reasoning that
+ * inventing a value out of silence was the mistake `matchCondition` refuses to
+ * make. Dropping it turned out to be worse: renormalising over what was left
+ * meant a listing with fewer signals was easier to score highly, which is the
+ * wrong bias for choosing something to buy. `MISSING_AS_NEUTRAL` carries the
+ * measurement.
  */
 
 /** Gates: absolute, never rescued by a good price. */
@@ -154,11 +160,16 @@ export interface ReportRow {
   passesGates: boolean
   matching: boolean
   highlighted: boolean
+  /**
+   * Signals JEV gave no answer for. They are *in* the blend at the neutral point,
+   * so the row's note says which of its score is an assumption rather than a fact.
+   */
   missing: WeightedSignal[]
   /**
-   * Signals this listing has a value for, whose weight is zero — so they are not
-   * in the blend either, for a reason the reader chose rather than a silence JEV
-   * kept. Kept apart from `missing` because the two need different sentences.
+   * Signals this listing has a value for, whose weight is zero — absent from the
+   * blend entirely, for a reason the reader chose rather than a silence JEV kept.
+   * Kept apart from `missing` because the two are opposites and need different
+   * sentences: one is in the blend as an assumption, the other is not in it at all.
    */
   zeroWeight: WeightedSignal[]
   trust: SellerTrust
@@ -251,9 +262,28 @@ function reasonFor(
 }
 
 /**
- * The blend: a weighted average over the signals this listing actually has.
- * Missing signals are dropped and the remaining weights renormalise, so a
- * listing is never punished for an answer JEV never gave (spec §3.3).
+ * What a signal JEV never answered is worth in the blend: the middle of its own
+ * scale, since every signal here lives on 0…1.
+ *
+ * It used to be worth nothing — the signal was dropped and the remaining weights
+ * renormalised, which measured such a listing over five signals where others were
+ * measured over six, and so **rewarded the unknown**. Measured on run 8's real
+ * data (2026-09-25): the one listing whose seller record eBay rendered unparseably
+ * topped the whole ranking at 0.726, against 0.492 for the best listing that had
+ * every signal. Neutral is not zero either: silence is not a bad answer, which is
+ * the half of spec §3.3 that still holds.
+ */
+const MISSING_AS_NEUTRAL = 0.5
+
+/**
+ * The blend: a weighted average over the signals the buyer has weighted.
+ *
+ * A signal with no answer counts as `MISSING_AS_NEUTRAL` rather than being
+ * dropped. A signal whose weight is zero is *absent from the sum entirely*, value
+ * and weight both — that is a question the buyer switched off, not one nobody
+ * answered, and substituting the neutral point for it would drag every row toward
+ * the middle for something they did not ask. So the reason to return null is one
+ * state only: every weight is zero (`allWeightsZero`).
  */
 function blendOf(
   values: Record<WeightedSignal, number | null>,
@@ -262,10 +292,9 @@ function blendOf(
   let total = 0
   let weightsUsed = 0
   for (const signal of WEIGHTED_SIGNALS) {
-    const value = values[signal]
     const weight = weights[signal]
-    if (value === null || weight <= 0) continue
-    total += weight * value
+    if (weight <= 0) continue
+    total += weight * (values[signal] ?? MISSING_AS_NEUTRAL)
     weightsUsed += weight
   }
   return weightsUsed === 0 ? null : total / weightsUsed

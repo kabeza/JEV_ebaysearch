@@ -198,25 +198,86 @@ describe('buildReport gates', () => {
 })
 
 describe('buildReport blend', () => {
-  it('puts a listing with a missing signal above one that has it low, not below', () => {
-    const partial = listing({ id: 1 })
-    const low = listing({ id: 2 })
-    const partialJudgments = judged(1).filter((j) => j.questionKey !== 'price_value')
-    const lowJudgments = judged(2, { price_value: SCORE(0) })
-    const report = buildReport([partial, low], [...partialJudgments, ...lowJudgments], settings())
-    const ids = report.matching.map((r) => r.listing.id)
-    expect(ids).toEqual([1, 2])
-    expect(report.matching[0]!.missing).toEqual(['price_value'])
-    expect(report.matching[1]!.missing).toEqual([])
+  it('counts a signal that was never answered as the middle of its scale', () => {
+    // The opposite until 2026-09-25: a missing signal was dropped and the remaining
+    // weights renormalised, which systematically rewarded the unknown. Measured on
+    // run 8's real data, the one listing whose seller record eBay rendered
+    // unparseably topped the ranking at 0.726 against 0.492 for the best listing
+    // that had every signal. The neutral point is the middle of each signal's own
+    // scale, not zero — silence is not a bad answer either, which is what §3.3 was
+    // protecting.
+    const answered = listing({ id: 1 })
+    const silent = listing({ id: 2 })
+    const onlyPrice = {
+      spec_match: 0,
+      price_value: 1,
+      listing_trust: 0,
+      criteria_freeform: 0,
+      seller_feedback: 0,
+      shipping: 0,
+    }
+    const report = buildReport(
+      [answered, silent],
+      [
+        ...judged(1, { price_value: SCORE(4) }),
+        ...judged(2).filter((j) => j.questionKey !== 'price_value'),
+      ],
+      settings({ weights: onlyPrice }),
+    )
+    const byId = new Map(
+      [...report.matching, ...report.discarded].map((r) => [r.listing.id, r]),
+    )
+
+    // A perfect price_value is 1; never having been asked is 0.5.
+    expect(byId.get(1)!.blend).toBeCloseTo(1)
+    expect(byId.get(1)!.missing).toEqual([])
+    expect(byId.get(2)!.blend).toBeCloseTo(0.5)
+    expect(byId.get(2)!.missing).toEqual(['price_value'])
   })
 
-  it('renormalises rather than counting a missing signal as zero', () => {
-    const missing = listing({ id: 1, shipping: 0 })
-    const worst = listing({ id: 2, shipping: 0 })
-    const a = judged(1).filter((j) => j.questionKey !== 'price_value')
-    const b = judged(2, { price_value: SCORE(0) })
-    const report = buildReport([missing, worst], [...a, ...b], settings())
-    expect(report.matching[0]!.blend!).toBeGreaterThan(report.matching[1]!.blend!)
+  it('still ranks a never-answered signal above one answered badly', () => {
+    // Neutral is not a floor and not a penalty: 0.5 beats the worst possible answer,
+    // which is the half of §3.3 that survives the change.
+    const silent = listing({ id: 1 })
+    const bad = listing({ id: 2 })
+    const report = buildReport(
+      [silent, bad],
+      [
+        ...judged(1).filter((j) => j.questionKey !== 'price_value'),
+        ...judged(2, { price_value: SCORE(0) }),
+      ],
+      settings(),
+    )
+    const byId = new Map(
+      [...report.matching, ...report.discarded].map((r) => [r.listing.id, r]),
+    )
+    expect(byId.get(1)!.blend!).toBeGreaterThan(byId.get(2)!.blend!)
+  })
+
+  it('leaves a signal switched off by a zero weight out of the average entirely', () => {
+    // A zero weight is not the same state as "never answered": the signal is absent
+    // from the sum, and so is its weight. Substituting the neutral point for it
+    // would drag every row toward the middle for a question nobody asked — which is
+    // why the weight check comes before the substitution.
+    const row = listing({ id: 1 })
+    const weights = {
+      spec_match: 1,
+      price_value: 0,
+      listing_trust: 0,
+      criteria_freeform: 0,
+      seller_feedback: 0,
+      shipping: 0,
+    }
+    const report = buildReport(
+      [row],
+      judged(1, { spec_match: NOUL(1) }),
+      settings({ weights, matchThreshold: 0 }),
+    )
+    const found = report.matching[0] ?? report.discarded[0]!
+
+    expect(found.blend).toBeCloseTo(1)
+    expect(found.zeroWeight).toContain('shipping')
+    expect(found.missing).toEqual([])
   })
 
   it('has no blend at all when every weight is zero', () => {
@@ -338,15 +399,23 @@ describe('buildReport derived signals', () => {
     expect(byId.get(2)!.trust.tier).toBe('trusted')
   })
 
-  it('leaves an unparseable seller out of the blend instead of scoring it zero', () => {
+  it('reports an unparseable seller as missing, and scores it neutral rather than zero', () => {
+    // It used to be dropped from the blend entirely, which is what let this very
+    // row — run 8's unparseable ASUS — top the ranking. Now it counts as the middle
+    // of the scale and the row still says which signal JEV has nothing for.
     const listings = [
       listing({ id: 1, sellerFeedback: 'PowerSeller' }),
       listing({ id: 2, sellerFeedback: '100% positive (19K)' }),
     ]
     const report = buildReport(listings, [...judged(1), ...judged(2)], settings())
-    const byId = new Map(report.matching.map((r) => [r.listing.id, r]))
+    const byId = new Map(
+      [...report.matching, ...report.discarded].map((r) => [r.listing.id, r]),
+    )
     expect(byId.get(1)!.values.seller_feedback).toBeNull()
     expect(byId.get(1)!.missing).toContain('seller_feedback')
+    // Neutral is the middle of the run's own ranking, not the bottom.
+    expect(byId.get(1)!.blend).not.toBeNull()
+    expect(byId.get(1)!.blend!).toBeGreaterThan(0)
   })
 })
 

@@ -205,6 +205,43 @@ describe('judgeSurvivors', () => {
     expect(listJudgments(db, run.id)).toHaveLength(72)
   })
 
+  it('halves the batch for the refusal the service actually sends', async () => {
+    // Measured 2026-09-25: an oversized batch comes back as a 400 carrying the
+    // service's own `max_tokens_exceeded` marker, not as a 422. `tests/jev-batch`
+    // proves the predicate recognises it; this proves the pipeline then halves
+    // instead of failing the run, which is what rule 17 promises a person and what
+    // the 422-only case above could never see.
+    const { db, run } = setup(12)
+    const sizes: number[] = []
+    const client = {
+      async systemOne(req: JevRequest): Promise<JevResult> {
+        const count = Object.keys(req.questions).length / QUESTION_KEYS.length
+        sizes.push(count)
+        if (count > 5) {
+          throw Object.assign(new Error('400 {"detail":{"error_type":"max_tokens_exceeded"}}'), {
+            status: 400,
+            body: { detail: { error_type: 'max_tokens_exceeded' } },
+          })
+        }
+        const answers: Record<string, JevAnswer> = {}
+        for (const key of Object.keys(req.questions)) answers[key] = { type: 'noul', noul: 0.9 }
+        return { model: 'fake', answers, usage: { input_tokens: 10, output_tokens: 1 } }
+      },
+    }
+
+    const outcome = await judgeSurvivors({
+      db,
+      runId: run.id,
+      request,
+      client,
+      batchSize: 10,
+      emit: () => {},
+    })
+
+    expect(sizes).toEqual([10, 5, 5, 2])
+    expect(outcome.judged).toBe(12)
+  })
+
   it('gives up loudly when even a single listing is refused, rather than storing nothing quietly', async () => {
     const { db, run } = setup(3)
     const client = {

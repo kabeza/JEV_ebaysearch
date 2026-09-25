@@ -24,21 +24,52 @@ export function halve(size: number): number {
 }
 
 /**
+ * Everything an error says, as one string: the message, plus the response body
+ * when the SDK attached one. The status is a separate question — this is the text
+ * a marker can be found in.
+ */
+function errorText(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err)
+  const body =
+    typeof err === 'object' && err !== null ? (err as { body?: unknown }).body : undefined
+  if (body === undefined) return message
+  try {
+    return `${message} ${typeof body === 'string' ? body : JSON.stringify(body)}`
+  } catch {
+    return message
+  }
+}
+
+/**
  * Whether an error means "this request was too large".
  *
- * The documented answer is a 422, but the SDK surfaces it several ways — a
- * message, a plain status on the thrown object — so both are checked. A 401 and
- * a 529 deliberately do not match: retrying a bad key smaller would loop until
- * the batch size hit 1 and then fail anyway, with a much less useful message.
+ * The documented answer is a 422, but the service refuses an oversized batch as a
+ * **400** — measured on 2026-09-25 with `scripts/probe-batch-size.ts`:
+ * `BadRequestError`, `status: 400`,
+ * `400 {"detail":{"error_type":"max_tokens_exceeded"}}`. With the 422-only test
+ * the batch was never halved and the run died instead, which is the opposite of
+ * what rule 17 promises a person.
+ *
+ * The 400 is matched on the service's own marker rather than on the status: a 400
+ * for a malformed question carries no such marker, and halving for it would loop
+ * the batch down to 1 and fail there anyway, with a much less useful message. The
+ * marker is checked without a status too, because the SDK does not always attach
+ * one.
+ *
+ * A 401 and a 529 deliberately do not match either: retrying a bad key smaller is
+ * the same loop as above.
  */
 export function isTooLargeError(err: unknown): boolean {
   if (typeof err === 'object' && err !== null) {
-    const status = (err as { status?: unknown; statusCode?: unknown }).status ??
+    const status =
+      (err as { status?: unknown; statusCode?: unknown }).status ??
       (err as { statusCode?: unknown }).statusCode
     if (status === 422) return true
   }
-  const message = err instanceof Error ? err.message : String(err)
-  return /\b422\b/.test(message) || /unprocessable/i.test(message)
+
+  const text = errorText(err)
+  if (/\b422\b/.test(text) || /unprocessable/i.test(text)) return true
+  return /max_tokens_exceeded/i.test(text)
 }
 
 /**

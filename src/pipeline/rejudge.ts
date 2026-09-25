@@ -1,5 +1,7 @@
 import type { Database as SqliteDatabase } from 'better-sqlite3'
 import { listJudgeable, type StoredListing } from '../storage/listings'
+import { updateSearchRequest } from '../storage/searches'
+import { getRun } from '../storage/runs'
 import { nextQuestionnaireVersion, saveJudgments, saveQuestionnaire } from '../storage/judgments'
 import {
   buildFromDraft,
@@ -60,6 +62,9 @@ export async function rejudgeRun(o: RejudgeOptions): Promise<RejudgeOutcome> {
     throw new Error(`This question set cannot be judged: ${reasons.join(' ')}`)
   }
 
+  const run = getRun(o.db, o.runId)
+  if (!run) throw new Error(`Run ${o.runId} does not exist`)
+
   const listings = listJudgeable(o.db, o.runId)
   if (listings.length === 0) throw new Error(`Run ${o.runId} has no listings to judge`)
 
@@ -78,6 +83,22 @@ export async function rejudgeRun(o: RejudgeOptions): Promise<RejudgeOutcome> {
     },
     version,
   )
+
+  // The buyer's half goes back onto the search, so the *next* fresh run
+  // pre-filters on it and asks about it, instead of starting from `spec: {}` and
+  // "no particular specification". Until this existed the editor wrote the
+  // request into the questionnaire and nowhere else.
+  //
+  // Written here, after the version exists and before a single JEV call: the
+  // request is data, not an answer, so it is complete the moment its version is
+  // stored. Writing it only on success would leave the newest version and the
+  // search disagreeing after a failure — the very gap this closes.
+  updateSearchRequest(o.db, run.searchId, {
+    criteriaText: o.draft.request.criteria_text,
+    spec: o.draft.request.spec ?? {},
+    maxPrice: o.draft.request.max_price,
+    acceptedConditions: o.draft.request.accepted_conditions,
+  })
 
   o.emit('rejudge.started', {
     questionnaireId,

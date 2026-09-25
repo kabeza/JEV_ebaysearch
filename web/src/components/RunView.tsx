@@ -28,7 +28,7 @@ import {
 } from '../lib/versions'
 import { VersionSelector } from './VersionSelector'
 import { QuestionEditor } from './QuestionEditor'
-import { DEFAULT_ACCEPTED_CONDITIONS, type SearchRequest } from '../../../src/jev/questions'
+import { acceptedConditionsFrom, type SearchRequest } from '../../../src/jev/questions'
 import { WeightControls } from './WeightControls'
 import { ReportTable } from './ReportTable'
 
@@ -199,14 +199,17 @@ export default function RunView({ runId, search, onClose }: Props) {
 
   // What the questions are asked against, as the server's `SearchRequest`: the
   // draft's buyer-side half. A search created before Stage 7 has no spec, so this
-  // is where the editor can finally fill one in.
+  // is where the editor can finally fill one in — and since a re-judge writes the
+  // request back onto the search, this is also what the next fresh run will use.
+  // Both conditions resolvers are the server's own, so the editor cannot open on
+  // something a run would not do.
   const fallbackRequest: SearchRequest = useMemo(
     () => ({
       keyword: search.keyword,
       criteria_text: search.criteriaText,
       spec: search.spec,
       max_price: typeof search.spec?.max_price === 'number' ? search.spec.max_price : undefined,
-      accepted_conditions: DEFAULT_ACCEPTED_CONDITIONS,
+      accepted_conditions: acceptedConditionsFrom(search.spec),
     }),
     [search],
   )

@@ -6,7 +6,16 @@ export interface RunSettings {
   maxPages: number
   /** Stop after this many minutes, whichever comes first. */
   maxMinutes: number
-  /** How many listings to send to JEV in one request. */
+  /**
+   * How many listings to send to JEV in one request.
+   *
+   * Measured, not guessed. With the questions made 44% cheaper on 2026-09-24, a
+   * batch of listings that carry item specifics costs ~1,570 tokens each: 20 is
+   * 49% of the 64k context, 25 is 63%, 40 is 98%, and 45 is refused. 25 keeps
+   * real headroom for a listing longer than the pool that was measured, and gives
+   * a 28-survivor run two calls instead of three. See
+   * `scripts/probe-batch-size.ts` and CLAUDE.md rule 17.
+   */
   batchSize: number
   /**
    * How many listing pages one run may open, on top of the search pages.
@@ -28,7 +37,7 @@ export interface RunSettings {
 export const DEFAULTS: RunSettings = {
   maxPages: 25,
   maxMinutes: 10,
-  batchSize: 10,
+  batchSize: 25,
   maxDetailVisits: 20,
   headed: true,
   zhomeZip: '10001',
@@ -57,9 +66,13 @@ export function estimateCostUsd(usage: { input_tokens: number; output_tokens: nu
 }
 
 /**
- * Service limits, from the same page. `stateTokens` is what actually bounds
- * batch size: the state must fit in 32k of the 64k context, alongside the
- * longest question.
+ * Service limits, from the same page.
+ *
+ * `contextTokens` is what actually bounds batch size, not `stateTokens`: the whole
+ * request — state *and* question text — shares the context. Measured 2026-09-25,
+ * the state for 50 listings with no detail behind them was 7,575 tokens (12% of
+ * the context) where the same request's questions pushed the full batch past the
+ * limit. The state limit alone would allow ~80 listings.
  */
 export const LIMITS = {
   contextTokens: 64_000,

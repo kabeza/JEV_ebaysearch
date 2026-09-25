@@ -5,7 +5,12 @@ describe('DEFAULTS', () => {
   it('matches the run defaults agreed in the spec', () => {
     expect(DEFAULTS.maxPages).toBe(25)
     expect(DEFAULTS.maxMinutes).toBe(10)
-    expect(DEFAULTS.batchSize).toBe(10)
+    // Raised from 10 on 2026-09-25, on measurement rather than on the old guess.
+    // `scripts/probe-batch-size.ts`: with the questions 44% cheaper, a batch of 20
+    // carries item specifics at 31.5k tokens (49% of the 64k context), 25 at 63%,
+    // and 45 is refused. 25 gives 28 survivors two calls instead of three with room
+    // left for a listing longer than the pool that was measured.
+    expect(DEFAULTS.batchSize).toBe(25)
     expect(DEFAULTS.headed).toBe(true)
   })
 

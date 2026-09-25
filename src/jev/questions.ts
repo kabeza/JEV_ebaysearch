@@ -59,6 +59,29 @@ export const DEFAULT_ACCEPTED_CONDITIONS = [
 ]
 
 /**
+ * The conditions a run accepts: the search's own, when the question editor has
+ * written them onto its spec, and the shipped default otherwise.
+ *
+ * They live in `spec_json` because `searches` has no column for them, so a search
+ * created before the editor wrote back has none — and until this existed, a run
+ * always hardcoded the default, which meant an edit to the accepted conditions in
+ * the editor was silently ignored by every fresh run.
+ *
+ * An empty or unusable list falls back to the default rather than being trusted:
+ * `condition_ok` quotes these conditions verbatim to JEV, so an empty list is a
+ * question with no content, which is worse than the default it would replace.
+ */
+export function acceptedConditionsFrom(spec: SearchSpec | undefined): string[] {
+  const stored = spec?.accepted_conditions
+  if (!Array.isArray(stored)) return DEFAULT_ACCEPTED_CONDITIONS
+
+  const conditions = stored.filter(
+    (c): c is string => typeof c === 'string' && c.trim().length > 0,
+  )
+  return conditions.length > 0 ? conditions : DEFAULT_ACCEPTED_CONDITIONS
+}
+
+/**
  * What the buyer asked for: the shared half of the state, sent once rather than
  * repeated per listing. Named to keep it distinct from `JevRequest` in
  * `client.ts`, which is the state-and-questions envelope for one API call.

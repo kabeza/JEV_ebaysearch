@@ -141,6 +141,102 @@ describe('startRun live path', () => {
     expect(replayed.length).toBeGreaterThan(0) // replay actually had work to do
   })
 
+  it('asks about the conditions the search carries, not the shipped default', async () => {
+    // The conditions live in the search's spec, because `searches` has no column
+    // for them. Before this, `startRun` hardcoded the default, so editing them in
+    // the question editor was silently ignored by every fresh run.
+    const db = openDatabase(':memory:')
+    const search = createSearch(db, {
+      name: 't',
+      keyword: 'thinkpad',
+      criteriaText: 'c',
+      spec: { accepted_conditions: ['Open Box'] },
+    })
+
+    const seen: string[][] = []
+    const recording = () => ({
+      async systemOne(req: JevRequest): Promise<JevResult> {
+        seen.push((req.state as { request: { accepted_conditions: string[] } }).request.accepted_conditions)
+        const answers: Record<string, JevAnswer> = {}
+        for (const key of Object.keys(req.questions)) answers[key] = { type: 'noul', noul: 0.9 }
+        return { model: 'fake', answers, usage: { input_tokens: 0, output_tokens: 0 } }
+      },
+    })
+
+    startRun(db, {
+      searchId: search.id,
+      settings: { maxPages: 1, pacingMinMs: 1, pacingMaxMs: 2, maxDetailVisits: 0 },
+      sourceFactory: async () => fakeSource(),
+      judgeClientFactory: recording as never,
+    })
+    await waitForIdle()
+
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen[0]).toEqual(['Open Box'])
+  })
+
+  it('pre-filters a fresh run on the spec a re-judge wrote back', async () => {
+    // The point of writing the request back onto the search: the next run in the
+    // real UI is a fresh one, and it must filter on what the editor confirmed
+    // rather than starting from `spec: {}`. A card that contradicts the RAM floor
+    // is rejected here; the same card survived when every search had an empty
+    // spec.
+    const db = openDatabase(':memory:')
+    const search = createSearch(db, {
+      name: 't',
+      keyword: 'thinkpad',
+      criteriaText: 'c',
+      spec: { ram_gb: 32, accepted_conditions: ['Open Box'] },
+    })
+
+    const cards: RawCard[] = [
+      { ...card('111111111'), title: 'Lenovo ThinkPad T14s Gen 6 32GB RAM 1TB SSD' },
+      { ...card('222222222'), title: 'Lenovo ThinkPad T14s Gen 6 16GB RAM 512GB SSD' },
+    ]
+    const source: PageSource = {
+      async goto() {
+        return { status: 200 }
+      },
+      async title() {
+        return 'ThinkPad T14s Gen 6 for sale | eBay'
+      },
+      async readCards() {
+        return cards
+      },
+      async readListing() {
+        return {
+          title: 'Lenovo ThinkPad T14s Gen 6',
+          price: 1200,
+          shipping: 0,
+          condition: 'Open Box',
+          sellerName: 'store',
+          sellerFeedback: '99% positive',
+          specifics: {},
+          rawText: [],
+        }
+      },
+      async screenshot() {},
+      async close() {},
+    }
+
+    const runId = startRun(db, {
+      searchId: search.id,
+      settings: { maxPages: 1, pacingMinMs: 1, pacingMaxMs: 2, maxDetailVisits: 0 },
+      sourceFactory: async () => source,
+      judgeClientFactory: fakeJevClient,
+    })
+    await waitForIdle()
+
+    const stages = db
+      .prepare('select ebay_item_id, stage, reject_reason from listings where run_id = ? order by ebay_item_id')
+      .all(runId) as { ebay_item_id: string; stage: string; reject_reason: string | null }[]
+
+    const rejected = stages.filter((s) => s.stage === 'rejected')
+    expect(rejected.map((s) => s.ebay_item_id)).toEqual(['222222222'])
+    expect(rejected[0]?.reject_reason).toMatch(/32/)
+    expect(stages.find((s) => s.ebay_item_id === '111111111')?.stage).not.toBe('rejected')
+  })
+
   it('refuses a second concurrent run rather than fighting over the browser profile', async () => {
     const db = openDatabase(':memory:')
     const search = createSearch(db, { name: 't', keyword: 'thinkpad', criteriaText: '' })

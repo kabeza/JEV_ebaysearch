@@ -5,7 +5,7 @@ import { executeRun } from './run'
 import { rejudgeRun } from './rejudge'
 import { requirementsFromSpec } from './prefilter'
 import { createJevClient, type JevClient } from '../jev/client'
-import { DEFAULT_ACCEPTED_CONDITIONS, type SearchRequest } from '../jev/questions'
+import { acceptedConditionsFrom, type SearchRequest } from '../jev/questions'
 import { createRun, getRun, finishRun } from '../storage/runs'
 import { nextQuestionnaireVersion } from '../storage/judgments'
 import type { QuestionnaireDraft } from '../jev/draft'
@@ -158,7 +158,9 @@ export function startRun(db: SqliteDatabase, o: StartRunOptions): number {
         criteria_text: search.criteriaText,
         spec: search.spec ?? {},
         max_price: maxPrice,
-        accepted_conditions: DEFAULT_ACCEPTED_CONDITIONS,
+        // The search's own conditions when the editor has written them onto its
+        // spec, the shipped default otherwise.
+        accepted_conditions: acceptedConditionsFrom(search.spec),
       }
 
       const outcome = await executeRun({

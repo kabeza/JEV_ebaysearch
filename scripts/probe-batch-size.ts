@@ -13,18 +13,29 @@
  * so the difference between them isolates the state from the question text.
  *
  * Run with:
- *   node --env-file=.env --import tsx scripts/probe-batch-size.ts [runId]
+ *   node --env-file=.env --import tsx scripts/probe-batch-size.ts [runId] [sizes] [--pool-repeat]
+ *
+ * `sizes` is a comma-separated list, defaulting to `1,5,10,20`.
+ *
+ * `--pool-repeat` is for the second question this probe had to answer on
+ * 2026-09-25: **how large a batch fits now that the questions got cheaper?** The
+ * only run with item specifics stored is run 8, and it has 20 listings — so a
+ * larger size has no honest data behind it. Repeating the pool to fill the batch
+ * measures exactly the right thing (tokens, and where JEV refuses) and the wrong
+ * thing to read anything else from: the listings are the same ones, so the output
+ * says so and the answer quality is not a result.
  *
  * Delete once `batchSize` is settled: the numbers it prints belong in the plan.
  */
 import { openDatabase } from '../src/storage/db'
 import { listListings, type StoredListing } from '../src/storage/listings'
+import { listJudgments } from '../src/storage/judgments'
 import { getSearch } from '../src/storage/searches'
 import { createJevClient } from '../src/jev/client'
 import {
+  acceptedConditionsFrom,
   buildQuestions,
   buildState,
-  DEFAULT_ACCEPTED_CONDITIONS,
   labelFor,
   type QuestionListing,
   type SearchRequest,
@@ -60,17 +71,50 @@ const request: SearchRequest = {
   criteria_text: search.criteriaText,
   spec: search.spec ?? {},
   max_price: typeof search.spec?.max_price === 'number' ? search.spec.max_price : undefined,
-  accepted_conditions: DEFAULT_ACCEPTED_CONDITIONS,
+  accepted_conditions: acceptedConditionsFrom(search.spec),
 }
 
-/** Judged listings are the ones with a listing page behind them, so the state
- *  is the size a run really produces — not a card-only lower bound. */
+/**
+ * The listings to measure: those with answers behind them, from the run's own
+ * judging or from a re-judge.
+ *
+ * Not `stage === 'judged'` — a re-judge never changes a listing's stage (rule 18),
+ * so a run that the editor re-judged is still `card_only` and would be invisible
+ * here. Run 8's pipeline-judged listings and run 7's re-judged ones are both found
+ * this way, and a listing whose page was never read carries `detail: null`, which
+ * is what makes its state the lower bound it is.
+ */
+const judgedIds = new Set(listJudgments(db, runId).map((j) => j.listingId))
 const listings = listListings(db, runId)
-  .filter((l) => l.stage === 'judged')
-  .map(toQuestionListing)
+  .filter((l) => judgedIds.has(l.id))
+  .map((l, i) => toQuestionListing(l, i))
+
+const poolRepeats = process.argv.includes('--pool-repeat')
+const sizes = (process.argv[3] ?? '1,5,10,20')
+  .split(',')
+  .map((n) => Number(n.trim()))
+  .filter((n) => Number.isFinite(n) && n > 0)
 
 console.log(`run ${runId} — search "${search.name}"`)
-console.log(`${listings.length} judged listings available\n`)
+console.log(`${listings.length} judged listings available`)
+console.log(`sizes: ${sizes.join(', ')}${poolRepeats ? ' (pool repeated to fill)' : ''}\n`)
+
+/**
+ * The batch for a size. With `--pool-repeat`, a size larger than the pool is
+ * filled by repeating it, and the relabelled copies are counted so no reader
+ * mistakes the row for a batch of distinct listings.
+ */
+function batchFor(size: number): { batch: QuestionListing[]; duplicated: number } {
+  if (listings.length === 0) throw new Error('no judged listings to measure')
+  if (!poolRepeats) return { batch: listings.slice(0, size), duplicated: 0 }
+
+  const batch: QuestionListing[] = []
+  for (let i = 0; i < size; i++) {
+    const source = listings[i % listings.length]!
+    batch.push({ ...source, label: labelFor(i) })
+  }
+  return { batch, duplicated: Math.max(0, size - listings.length) }
+}
 
 const client = createJevClient()
 
@@ -80,12 +124,16 @@ interface Measurement {
   tokens: number
   costUsd: number
   answers: number
+  duplicated: number
 }
 
 async function measure(shape: 'full' | 'one', size: number): Promise<Measurement> {
-  const batch = listings.slice(0, size)
+  const { batch, duplicated } = batchFor(size)
   const all = buildQuestions(request, batch)
-  const questions = shape === 'full' ? all : { [`${batch[0]!.label}.spec_match`]: all[`${batch[0]!.label}.spec_match`]! }
+  const questions =
+    shape === 'full'
+      ? all
+      : { [`${batch[0]!.label}.spec_match`]: all[`${batch[0]!.label}.spec_match`]! }
   const result = await client.systemOne({
     state: buildState(request, batch),
     questions,
@@ -97,27 +145,41 @@ async function measure(shape: 'full' | 'one', size: number): Promise<Measurement
     tokens: result.usage.input_tokens,
     costUsd: estimateCostUsd(result.usage),
     answers: Object.keys(result.answers).length,
+    duplicated,
   }
 }
 
-const sizes = [1, 5, 10, 20].filter((n) => n <= listings.length)
 const results: Measurement[] = []
+const refused: { shape: string; size: number; message: string }[] = []
 for (const size of sizes) {
   for (const shape of ['full', 'one'] as const) {
     try {
       results.push(await measure(shape, size))
     } catch (err) {
-      console.log(`${shape.padEnd(4)} n=${String(size).padStart(2)}  REFUSED: ${err instanceof Error ? err.message : String(err)}`)
+      const message = err instanceof Error ? err.message : String(err)
+      refused.push({ shape, size, message })
+      console.log(
+        `${shape.padEnd(4)} n=${String(size).padStart(2)}  REFUSED: ${message}`,
+      )
     }
   }
 }
 
-console.log('\nshape size  input_tokens   cost_usd   per_listing')
+console.log('\nshape size  input_tokens   cost_usd   per_listing  pct_of_context  duplicated')
 for (const r of results) {
+  const pct = ((r.tokens / LIMITS.contextTokens) * 100).toFixed(0)
   console.log(
     `${r.shape.padEnd(5)} ${String(r.size).padStart(3)}  ${String(r.tokens).padStart(12)}   ` +
-      `${r.costUsd.toFixed(7)}   ${(r.tokens / r.size).toFixed(0).padStart(6)}`,
+      `${r.costUsd.toFixed(7)}   ${(r.tokens / r.size).toFixed(0).padStart(6)}` +
+      `  ${pct.padStart(13)}%  ${String(r.duplicated).padStart(10)}`,
   )
+}
+
+// Where the run's own halving rule would land: the largest size that came back.
+const largest = results.reduce((max, r) => Math.max(max, r.size), 0)
+console.log(`\nlargest size that came back: ${largest > 0 ? largest : 'none'}`)
+for (const r of refused) {
+  console.log(`first refusal: ${r.shape} n=${r.size} — ${r.message.slice(0, 160)}`)
 }
 
 const full20 = results.find((r) => r.shape === 'full' && r.size === 20)

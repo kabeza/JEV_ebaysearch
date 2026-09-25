@@ -119,6 +119,24 @@ relative weights, and its row says which signal is missing. Substituting 0.5 wou
 mediocre answer out of silence — the same mistake `matchCondition` already refuses to make at the
 other end of the pipeline.
 
+> **Reversed on 2026-09-25. A missing answer now counts as 0.5, the middle of its own scale**
+> (`MISSING_AS_NEUTRAL` in `web/src/lib/score.ts`, CLAUDE.md rule 28). The paragraph above is kept
+> because its reasoning is sound and its conclusion was wrong: dropping the signal measured that
+> listing over five signals where every other listing was measured over six, so a listing with less
+> known about it was *easier* to score highly — the wrong bias for choosing something to buy, and an
+> incentive, not merely a distortion. Neutral rather than zero, so the half about not inventing a
+> mediocre answer out of silence still holds: a signal JEV never answered still ranks above one it
+> answered "worst possible".
+>
+> **What the change bought on real data was small, and the honest number matters.** On run 8 (20
+> judged listings) the one row with an unparseable seller record moved from 0.726 to 0.688 and stayed
+> the only matching row. Two things follow. First, one missing signal out of six moves a blend by
+> little: the row's other five signals really were that strong. Second, the rows under it were never
+> competitors — they are trackpoint caps whose `is_target_product` is 0.02, and the gates already
+> refuse to call them best. An earlier reading of this data said the unknown "topped the ranking
+> above every complete row"; that compared gated-out rows against matching ones and was wrong. The
+> policy is right on principle; on run 8 it did not change which listing comes first.
+
 ### 3.4 The blend and the gates
 
 ```
@@ -237,8 +255,9 @@ with the badge — the reader judges, the badge does not (spec §5.6.1). `100% p
 module from the server-side suite). The cases that matter:
 
 - a noul and a score normalise to the same 0…1 scale; a four-level legend normalises against four;
-- a missing answer is excluded and the other weights renormalise — asserted by a listing missing a
-  signal outranking one that has it low;
+- a missing answer scores 0.5 of its own scale (revised 2026-09-25, §3.3) — asserted numerically, and
+  by a never-answered signal still outranking one answered "worst possible"; and separately, that a
+  signal switched off by a zero weight is out of the average entirely rather than neutral;
 - free shipping beats the cheapest paid row; a spread of one value (or none) yields the middle
   rather than dividing by zero;
 - the feedback parser on every real form above, and `null` on `"PowerSeller"`;

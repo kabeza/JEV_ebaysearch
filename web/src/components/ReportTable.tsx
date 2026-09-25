@@ -168,7 +168,7 @@ export function ReportTable({
                     />
                     {row.missing.length > 0 && (
                       <p className="mt-2 text-xs text-lilac-ash/70">
-                        Not in the blend — no answer for{' '}
+                        Scored neutral, half of its scale — no answer for{' '}
                         {row.missing.map((s) => s.replace(/_/g, ' ')).join(', ')}
                       </p>
                     )}

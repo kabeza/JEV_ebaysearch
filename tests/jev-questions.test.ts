@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   DEFAULT_ACCEPTED_CONDITIONS,
   QUESTION_KEYS,
+  acceptedConditionsFrom,
   buildQuestions,
   buildState,
   type QuestionListing,
@@ -202,5 +203,40 @@ describe('buildState', () => {
     expect(DEFAULT_ACCEPTED_CONDITIONS).toContain('eBay Refurbished')
     expect(DEFAULT_ACCEPTED_CONDITIONS).not.toContain('Used')
     expect(DEFAULT_ACCEPTED_CONDITIONS).not.toContain('For parts or not working')
+  })
+})
+
+describe('acceptedConditionsFrom', () => {
+  it('uses the conditions the editor wrote onto the search', () => {
+    // `searches` has no column for them, so they live in the spec; before the
+    // editor wrote back, a run always used the shipped default and an edit in the
+    // editor was silently ignored by every fresh run.
+    expect(acceptedConditionsFrom({ accepted_conditions: ['Open Box', 'Used'] })).toEqual([
+      'Open Box',
+      'Used',
+    ])
+  })
+
+  it('falls back to the default when the search has none', () => {
+    expect(acceptedConditionsFrom({})).toEqual(DEFAULT_ACCEPTED_CONDITIONS)
+    expect(acceptedConditionsFrom(undefined)).toEqual(DEFAULT_ACCEPTED_CONDITIONS)
+  })
+
+  it('treats an empty or unusable list as absent rather than trusting it', () => {
+    // `condition_ok` lists these conditions verbatim to JEV, so an empty list is
+    // a question with no content — worse than the default it replaced.
+    expect(acceptedConditionsFrom({ accepted_conditions: [] })).toEqual(DEFAULT_ACCEPTED_CONDITIONS)
+    expect(acceptedConditionsFrom({ accepted_conditions: 'Open Box' })).toEqual(
+      DEFAULT_ACCEPTED_CONDITIONS,
+    )
+    expect(acceptedConditionsFrom({ accepted_conditions: ['  ', 7] })).toEqual(
+      DEFAULT_ACCEPTED_CONDITIONS,
+    )
+  })
+
+  it('drops unusable entries and keeps the rest', () => {
+    expect(acceptedConditionsFrom({ accepted_conditions: ['Open Box', '  ', 7] })).toEqual([
+      'Open Box',
+    ])
   })
 })

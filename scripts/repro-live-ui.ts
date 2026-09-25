@@ -389,12 +389,66 @@ async function main() {
   // Stage 7's acceptance criterion, measured where it is claimed: editing the
   // questions and re-judging the stored listings touches eBay not at all.
   const pagesBeforeRejudge = fixtureRequests
+
+  // Stage 9's: the buyer's half of the draft becomes the search's own definition,
+  // so the next fresh run pre-filters on it. Read the search before and after and
+  // compare — the assertion is that a re-judge changes a *different* row.
+  const readSearch = () =>
+    page.evaluate(async () => {
+      const res = await fetch('/api/searches')
+      const searches = (await res.json()) as {
+        name: string
+        criteriaText: string
+        spec: Record<string, unknown>
+      }[]
+      const found = searches.find((s) => s.name === 'Repro search')
+      return { criteriaText: found?.criteriaText ?? '', spec: found?.spec ?? {} }
+    })
+  const searchBefore = await readSearch()
+
   const rejudgeButton = page.getByRole('button', { name: 'Edit questions' })
   const editorOpened = await rejudgeButton
     .click()
     .then(() => true)
     .catch(() => false)
   await page.waitForTimeout(200)
+
+  // The sentence the editor shows so a rewrite of the search is never silent.
+  const noticeShown =
+    (await page.getByText('pre-filters on it and asks about it').count()) > 0
+
+  // Flat on purpose: a named inner function here is wrapped in `__name(...)` by
+  // esbuild's keepNames under tsx, and `__name` does not exist in the browser —
+  // the failure rule 4 in CLAUDE.md warns about, which this file just reproduced.
+  const editedBuyerFields = await page.evaluate(() => {
+    const criteria = document.querySelector(
+      'textarea[aria-label="criteria text"]',
+    ) as HTMLTextAreaElement | null
+    const ram = document.querySelector('input[aria-label="spec ram gb"]') as HTMLInputElement | null
+    const conditions = document.querySelector(
+      'input[aria-label="accepted conditions"]',
+    ) as HTMLInputElement | null
+    if (!criteria || !ram || !conditions) return false
+
+    // Through the native setters: React's value tracker ignores a direct
+    // assignment, so onChange would never run and the field would not move.
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(
+      criteria,
+      'criteria edited by the repro',
+    )
+    criteria.dispatchEvent(new Event('input', { bubbles: true }))
+
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(ram, '64')
+    ram.dispatchEvent(new Event('input', { bubbles: true }))
+
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(
+      conditions,
+      'Open Box',
+    )
+    conditions.dispatchEvent(new Event('input', { bubbles: true }))
+
+    return true
+  })
 
   const edited = await page.evaluate(() => {
     const textarea = document.querySelector(
@@ -421,10 +475,17 @@ async function main() {
   const versions = await page
     .locator('select[aria-label="questionnaire version"] option')
     .allInnerTexts()
+  const searchAfter = await readSearch()
 
   console.log(`\nre-judge: editor opened=${editorOpened} textarea found=${edited}`)
   console.log(`fixture pages fetched during a re-judge: ${pagesAfterRejudge - pagesBeforeRejudge}`)
   console.log(`questionnaire versions offered: ${JSON.stringify(versions)}`)
+  console.log(`buyer fields edited in the editor: ${editedBuyerFields}`)
+  console.log(`editor explains that a re-judge rewrites the search: ${noticeShown}`)
+  console.log(`search criteria before a re-judge: ${JSON.stringify(searchBefore.criteriaText)}`)
+  console.log(`search criteria after a re-judge:  ${JSON.stringify(searchAfter.criteriaText)}`)
+  console.log(`search spec before a re-judge: ${JSON.stringify(searchBefore.spec)}`)
+  console.log(`search spec after a re-judge:  ${JSON.stringify(searchAfter.spec)}`)
 
   // The third acceptance criterion: the previous version's answers are still
   // readable, beside the new ones. Open the first row and look for "was".

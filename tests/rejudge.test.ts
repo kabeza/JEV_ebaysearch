@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { openDatabase } from '../src/storage/db'
-import { createSearch } from '../src/storage/searches'
+import { createSearch, getSearch } from '../src/storage/searches'
 import { createRun, finishRun } from '../src/storage/runs'
 import { insertCards } from '../src/storage/listings'
 import type { RawCard } from '../src/scraper/cards'
@@ -234,6 +234,100 @@ describe('rejudgeRun', () => {
 
     expect(client.calls()).toBe(0)
     expect(listQuestionnaires(db, runId)).toHaveLength(0)
+  })
+
+  it('writes the buyer’s half back onto the run’s search, so the next fresh run filters on it', async () => {
+    // Until this existed, every stored search had `spec: {}`: the editor wrote the
+    // draft's request into the questionnaire and never back onto the search, so a
+    // fresh run pre-filtered on nothing and `spec_match` asked JEV about "no
+    // particular specification".
+    const { db, runId, search } = fixture(['judged', 'judged'])
+    await rejudgeRun({
+      db,
+      runId,
+      draft: defaultDraft({
+        keyword: 'k',
+        criteria_text: '32gb ram, Ryzen, touch',
+        spec: { ram_gb: 32, cpu_family: 'AMD Ryzen' },
+        max_price: 1600,
+        accepted_conditions: ['Open Box', 'Certified - Refurbished'],
+      }),
+      client: fakeClient() as never,
+      batchSize: 3,
+      emit: () => {},
+    })
+
+    const after = getSearch(db, search.id)!
+    expect(after.criteriaText).toBe('32gb ram, Ryzen, touch')
+    // The budget is mirrored into `spec`, which is where the pre-filter and the
+    // eBay URL read it — the editor only edits the top-level one.
+    expect(after.spec).toEqual({
+      ram_gb: 32,
+      cpu_family: 'AMD Ryzen',
+      max_price: 1600,
+      accepted_conditions: ['Open Box', 'Certified - Refurbished'],
+    })
+    // The name and keyword belong to the search; the editor does not edit them.
+    expect(after.name).toBe('s')
+    expect(after.keyword).toBe('k')
+  })
+
+  it('writes nothing back when the draft is refused', async () => {
+    const { db, runId, search } = fixture(['judged'])
+    const broken = defaultDraft({
+      keyword: 'k',
+      criteria_text: 'should never land',
+      spec: { ram_gb: 64 },
+      max_price: 999,
+      accepted_conditions: ['Used'],
+    })
+    broken.questions = broken.questions.map((q) => ({ ...q, instructions: '' })) as never
+
+    await expect(
+      rejudgeRun({ db, runId, draft: broken, client: fakeClient() as never, batchSize: 10, emit: () => {} }),
+    ).rejects.toThrow(/wording/)
+
+    const after = getSearch(db, search.id)!
+    expect(after.criteriaText).toBe('c')
+    expect(after.spec).toEqual({})
+  })
+
+  it('keeps the written request when the judging itself fails', async () => {
+    // The request is complete the moment its version exists: it is data, not an
+    // answer. Writing it only on success would leave the newest version and the
+    // search disagreeing after a failure — which is the gap this closes.
+    const { db, runId, search } = fixture(['judged', 'judged'])
+    let calls = 0
+    const failing = {
+      systemOne: async () => {
+        calls++
+        throw new Error('502 upstream')
+      },
+    }
+
+    await expect(
+      rejudgeRun({
+        db,
+        runId,
+        draft: defaultDraft({
+          keyword: 'k',
+          criteria_text: 'written before the failure',
+          spec: { ram_gb: 16 },
+          max_price: undefined,
+          accepted_conditions: ['Open Box'],
+        }),
+        client: failing as never,
+        batchSize: 10,
+        emit: () => {},
+      }),
+    ).rejects.toThrow(/502 upstream/)
+
+    expect(calls).toBeGreaterThan(0)
+    expect(getSearch(db, search.id)!.criteriaText).toBe('written before the failure')
+    expect(getSearch(db, search.id)!.spec).toEqual({
+      ram_gb: 16,
+      accepted_conditions: ['Open Box'],
+    })
   })
 })
 

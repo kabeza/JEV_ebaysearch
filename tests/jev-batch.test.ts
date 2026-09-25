@@ -46,4 +46,33 @@ describe('isTooLargeError', () => {
     expect(isTooLargeError(new Error('529 Overloaded'))).toBe(false)
     expect(isTooLargeError(new Error('socket hang up'))).toBe(false)
   })
+
+  it('recognises an oversized batch refused as a bad request', () => {
+    // Measured 2026-09-25 with `scripts/probe-batch-size.ts`: the API refuses a
+    // batch that does not fit as a **400**, not a 422 — `BadRequestError` with
+    // `400 {"detail":{"error_type":"max_tokens_exceeded"}}`. The 422-only test
+    // missed it, so such a batch was never halved and the run died instead, which
+    // is the opposite of what rule 17 promises.
+    const refused = Object.assign(
+      new Error('400 {"detail":{"error_type":"max_tokens_exceeded"}}'),
+      { status: 400, body: { detail: { error_type: 'max_tokens_exceeded' } } },
+    )
+    expect(isTooLargeError(refused)).toBe(true)
+
+    // The marker alone is enough: the SDK does not always carry a status field,
+    // and nothing else the service says contains this string.
+    expect(isTooLargeError(new Error('max_tokens_exceeded'))).toBe(true)
+    expect(isTooLargeError({ body: { detail: { error_type: 'max_tokens_exceeded' } } })).toBe(true)
+  })
+
+  it('does not halve for a bad request that says something else', () => {
+    // A 400 for a malformed question is not a size problem. Halving for it would
+    // spend calls walking the batch down to 1 to fail there anyway.
+    const malformed = Object.assign(new Error('400 {"detail":{"error_type":"invalid_question"}}'), {
+      status: 400,
+    })
+    expect(isTooLargeError(malformed)).toBe(false)
+    expect(isTooLargeError({ status: 400 })).toBe(false)
+    expect(isTooLargeError(new Error('400 Bad Request'))).toBe(false)
+  })
 })
