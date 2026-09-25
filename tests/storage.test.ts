@@ -7,6 +7,10 @@ import {
   specForSearch,
   updateSearchRequest,
 } from '../src/storage/searches'
+import { createRun, finishRun, listRunSummaries } from '../src/storage/runs'
+import { insertCards } from '../src/storage/listings'
+import { saveJudgments, saveQuestionnaire } from '../src/storage/judgments'
+import type { RawCard } from '../src/scraper/cards'
 
 const input = {
   name: 'ThinkPad T14s Gen 6',
@@ -125,5 +129,98 @@ describe('updateSearchRequest', () => {
     expect(() =>
       updateSearchRequest(db, 999, { criteriaText: 'x', spec: {}, acceptedConditions: [] }),
     ).not.toThrow()
+  })
+})
+
+describe('listRunSummaries', () => {
+  const card = (itemId: string): RawCard => ({
+    itemId,
+    title: `Lenovo ThinkPad T14s ${itemId}`,
+    url: `https://www.ebay.com/itm/${itemId}`,
+    price: 1200,
+    shipping: 0,
+    currency: 'USD',
+    conditionLabel: 'Open Box',
+    sellerName: 'store',
+    sellerFeedback: '100% positive (450)',
+    watchers: null,
+    buyingFormat: 'Buy It Now',
+    sponsoredMarker: false,
+    rawText: [],
+  })
+
+  it('counts what a run found, what the pre-filter stopped and what it answered', () => {
+    const db = openDatabase(':memory:')
+    const search = createSearch(db, input)
+    const run = createRun(db, search.id, {})
+    const stored = insertCards(db, run.id, [card('1'), card('2'), card('3')])
+    db.prepare("update listings set stage = 'rejected' where id = ?").run(
+      stored.idsByItemId.get('3'),
+    )
+
+    const questionnaireId = saveQuestionnaire(
+      db,
+      run.id,
+      { request: input, questionKeys: ['is_target_product'] },
+      1,
+    )
+    saveJudgments(db, {
+      runId: run.id,
+      questionnaireId,
+      listingId: stored.idsByItemId.get('1')!,
+      answers: { is_target_product: { type: 'noul', noul: 0.9 } },
+    })
+
+    const [summary] = listRunSummaries(db)
+    expect(summary).toMatchObject({
+      id: run.id,
+      searchId: search.id,
+      status: 'running',
+      listings: 3,
+      rejected: 1,
+      judged: 1,
+      finishedAt: null,
+    })
+  })
+
+  it('returns every run newest first, including one with nothing under it', () => {
+    const db = openDatabase(':memory:')
+    const search = createSearch(db, input)
+    const first = createRun(db, search.id, {})
+    const second = createRun(db, search.id, {})
+    finishRun(db, first.id, { status: 'cancelled' })
+
+    const summaries = listRunSummaries(db)
+    expect(summaries.map((s) => s.id)).toEqual([second.id, first.id])
+    expect(summaries[1]).toMatchObject({ listings: 0, rejected: 0, judged: 0, status: 'cancelled' })
+    // A finished run keeps the moment it ended, which is what the row dates it by.
+    expect(summaries[1]!.finishedAt).toBeTruthy()
+  })
+
+  it('counts a listing once however many versions answered it', () => {
+    // `listJudgments` returns every version, so a naive count would report twice
+    // the listings once a run has been re-judged.
+    const db = openDatabase(':memory:')
+    const search = createSearch(db, input)
+    const run = createRun(db, search.id, {})
+    const stored = insertCards(db, run.id, [card('1')])
+    const listingId = stored.idsByItemId.get('1')!
+
+    for (const version of [1, 2]) {
+      const questionnaireId = saveQuestionnaire(
+        db,
+        run.id,
+        { request: input, questionKeys: ['is_target_product'] },
+        version,
+      )
+      saveJudgments(db, {
+        runId: run.id,
+        questionnaireId,
+        listingId,
+        answers: { is_target_product: { type: 'noul', noul: 0.9 } },
+      })
+    }
+
+    expect(listRunSummaries(db)[0]!.judged).toBe(1)
   })
 })

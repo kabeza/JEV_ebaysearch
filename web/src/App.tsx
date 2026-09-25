@@ -1,7 +1,155 @@
 import { useEffect, useState } from 'react'
-import { createSearch, listSearches, startRun, type Search } from './lib/api'
+import {
+  cancelRun,
+  createSearch,
+  deleteSearch,
+  listSearches,
+  resumeRun,
+  startRun,
+  type Search,
+  type RunStatus,
+} from './lib/api'
 import { EMPTY_SPEC_FORM, specFromForm, summariseSpec, type SpecFormValues } from './lib/spec'
 import RunView from './components/RunView'
+import { RunStatusBadge } from './components/RunStatusBadge'
+
+const RUN_LABELS: Record<RunStatus, string> = {
+  queued: 'en cola',
+  running: 'corriendo',
+  paused: 'en pausa',
+  cancelled: 'cancelada',
+  failed: 'falló',
+  complete: 'completa',
+}
+
+const FINISHED: RunStatus[] = ['cancelled', 'failed', 'complete']
+
+/**
+ * One search's runs, and the only door to a stored report.
+ *
+ * Before this the page could not open a run it had not just started: the run view
+ * was reachable only from `startRun`, so a finished report was unreachable from
+ * the UI and a paused run offered its Resume button to nobody. Numbers are stated
+ * as they are — a run with no answers says so and offers the re-judge instead of a
+ * report that would be empty.
+ */
+function SearchRuns({
+  search,
+  onOpen,
+  onChanged,
+  onError,
+}: {
+  search: Search
+  onOpen: (runId: number) => void
+  onChanged: () => void
+  onError: (message: string) => void
+}) {
+  const [confirming, setConfirming] = useState(false)
+
+  async function act(work: () => Promise<unknown>) {
+    onError('')
+    try {
+      await work()
+      onChanged()
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  const totals = search.runs.reduce(
+    (acc, run) => ({
+      listings: acc.listings + run.listings,
+      judged: acc.judged + run.judged,
+    }),
+    { listings: 0, judged: 0 },
+  )
+
+  return (
+    <ul className="mt-3 space-y-2">
+      {search.runs.length === 0 && (
+        <li className="text-sm text-lilac-ash/50">Sin corridas todavía.</li>
+      )}
+
+      {search.runs.map((run) => (
+        <li
+          key={run.id}
+          className="flex flex-wrap items-center justify-between gap-2 rounded border border-lilac-ash/20 px-3 py-2"
+        >
+          <div className="text-sm text-lilac-ash">
+            <RunStatusBadge status={run.status} />
+            <span className="ml-2">
+              {/* The id and the date, because two runs of one search otherwise
+                  render identically and choosing the report becomes a coin flip. */}
+              #{run.id} · {(run.finishedAt ?? run.startedAt)?.slice(0, 10) ?? 'sin fecha'} ·{' '}
+              {RUN_LABELS[run.status]} · {run.listings} listings ·{' '}
+              {run.judged > 0 ? `${run.judged} juzgados` : 'sin juzgar'}
+            </span>
+          </div>
+          <div className="flex gap-2">
+            {/* Exactly one way in, whatever the state. `paused` is the one status
+                with its own controls — and Resume must not take them away, so the
+                choice is by status rather than by "is it finished". */}
+            {run.status === 'paused' ? (
+              <>
+                <button
+                  onClick={() => void act(() => resumeRun(run.id))}
+                  className="rounded bg-almond-silk px-3 py-1 text-sm font-medium text-space-indigo"
+                >
+                  Resume
+                </button>
+                <button
+                  onClick={() => void act(() => cancelRun(run.id))}
+                  className="rounded bg-dusty-grape px-3 py-1 text-sm text-seashell"
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={() => onOpen(run.id)}
+                className="rounded bg-dusty-grape px-3 py-1 text-sm text-seashell"
+              >
+                {!FINISHED.includes(run.status)
+                  ? 'Ver corrida'
+                  : run.judged === 0
+                    ? 'Re-judge'
+                    : 'Ver reporte'}
+              </button>
+            )}
+          </div>
+        </li>
+      ))}
+
+      <li className="pt-1">
+        {confirming ? (
+          <span className="flex flex-wrap items-center gap-2 text-sm text-almond-silk">
+            Esto borra {search.runs.length} corrida(s), {totals.listings} listings y {totals.judged}{' '}
+            respuestas. No se puede deshacer.
+            <button
+              onClick={() => void act(async () => deleteSearch(search.id))}
+              className="rounded bg-danger px-3 py-1 font-medium text-seashell"
+            >
+              Sí, borrar
+            </button>
+            <button
+              onClick={() => setConfirming(false)}
+              className="rounded border border-lilac-ash/40 px-3 py-1"
+            >
+              No
+            </button>
+          </span>
+        ) : (
+          <button
+            onClick={() => setConfirming(true)}
+            className="rounded border border-almond-silk/50 px-3 py-1 text-sm text-almond-silk"
+          >
+            Borrar búsqueda
+          </button>
+        )}
+      </li>
+    </ul>
+  )
+}
 
 function Field({
   label,
@@ -49,6 +197,26 @@ export default function App() {
   useEffect(() => {
     void refresh()
   }, [])
+
+  /**
+   * Keeps the hub honest while a run is in flight.
+   *
+   * The list is otherwise refreshed only on mount and after its own buttons, so a
+   * run that starts, pauses or finishes while the run view is closed leaves the row
+   * stale — showing `corriendo` with no Resume for a run that is waiting for
+   * exactly that click. Polling only while something is unsettled keeps it quiet
+   * the rest of the time, and it does not touch eBay: it reads the database
+   * through the same route the buttons do.
+   */
+  const unsettled = searches.some((s) =>
+    s.runs.some((run) => run.status === 'running' || run.status === 'paused' || run.status === 'queued'),
+  )
+
+  useEffect(() => {
+    if (!unsettled) return
+    const timer = setInterval(() => void refresh(), 4000)
+    return () => clearInterval(timer)
+  }, [unsettled])
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -173,6 +341,12 @@ export default function App() {
                         try {
                           const { runId } = await startRun(s.id)
                           setActiveRun({ ...s, id: runId })
+                          // So the row shows the run it just started. Without
+                          // this the hub keeps the runs it had until a reload,
+                          // and a run that pauses while the run view is closed —
+                          // the case the whole change exists for — is invisible
+                          // for the same reason.
+                          await refresh()
                         } catch (err) {
                           setError(err instanceof Error ? err.message : String(err))
                         }
@@ -194,6 +368,12 @@ export default function App() {
                       </span>
                     )}
                   </p>
+                  <SearchRuns
+                    search={s}
+                    onOpen={(runId) => setActiveRun({ ...s, id: runId })}
+                    onChanged={() => void refresh()}
+                    onError={setError}
+                  />
                 </li>
               )
             })}

@@ -11,6 +11,14 @@
   --color-lilac-ash: #9a8c98; /* muted text, borders, inactive states */
   --color-almond-silk: #c9ada7; /* warm accent, highlights */
   --color-seashell: #f2e9e4; /* light backdrop, primary text on dark */
+  /*
+   * The destructive action. It exists because the alternative was a delete button
+   * wearing the same almond fill as Save, Run search and Resume — the spec asks for
+   * a treatment of its own for the one action that cannot be undone, and the
+   * palette had none. A muted brick, so it reads as a warning without shouting as
+   * pure red would against these dusty colours. Seashell on it is legible.
+   */
+  --color-danger: #a4443a;
 }
 
 body {

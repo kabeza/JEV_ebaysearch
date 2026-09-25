@@ -3,7 +3,11 @@ import { DEFAULTS, PRICING, estimateCostUsd } from '../src/shared/config'
 
 describe('DEFAULTS', () => {
   it('matches the run defaults agreed in the spec', () => {
-    expect(DEFAULTS.maxPages).toBe(25)
+    // 10 since 2026-09-25, at the owner's request after a run was 403'd on page 18.
+    // The pages-to-listings arithmetic is not 50 each: eBay returns 14–19 cards per
+    // page with `_ipg=60` requested, measured on run 9 — so 10 pages is ~150–190
+    // cards, which is where the useful results already ran out.
+    expect(DEFAULTS.maxPages).toBe(10)
     expect(DEFAULTS.maxMinutes).toBe(10)
     // Raised from 10 on 2026-09-25, on measurement rather than on the old guess.
     // `scripts/probe-batch-size.ts`: with the questions 44% cheaper, a batch of 20

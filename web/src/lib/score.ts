@@ -1,5 +1,6 @@
 import type { JevAnswer, Judgment, Listing } from './api'
 import { parseSellerFeedback, sellerTrust, type SellerTrust } from './sellerTrust'
+import { ramGbOf, storageGbOf } from './capacity'
 
 /**
  * The composition, in code rather than in the model (spec §8.5).
@@ -113,7 +114,15 @@ export function feedbackRank(pct: number | null, values: number[]): number | nul
   return clamp01((first + last) / 2 / (sorted.length - 1))
 }
 
-export type SortColumn = 'blend' | 'price' | 'shipping' | 'title' | 'seller' | 'trust'
+export type SortColumn =
+  | 'blend'
+  | 'price'
+  | 'shipping'
+  | 'title'
+  | 'seller'
+  | 'trust'
+  | 'ram'
+  | 'storage'
 export interface Sort {
   column: SortColumn
   direction: 'asc' | 'desc'
@@ -156,6 +165,12 @@ export interface ReportRow {
   answers: Record<string, JevAnswer>
   gates: Record<GateSignal, number | null>
   values: Record<WeightedSignal, number | null>
+  /**
+   * Capacity, read from the title by the pre-filter's own parsers (see
+   * `capacity.ts`). Null when the title states none, and rendered as `—`.
+   */
+  ramGb: number | null
+  storageGb: number | null
   blend: number | null
   passesGates: boolean
   matching: boolean
@@ -318,6 +333,18 @@ function compare(a: ReportRow, b: ReportRow, sort: Sort): number {
       if (bv === null) return -1
       return (av - bv) * flip
     }
+    case 'ram':
+    case 'storage': {
+      const key = sort.column === 'ram' ? 'ramGb' : 'storageGb'
+      const av = a[key]
+      const bv = b[key]
+      // Unknown is last whichever way the sort points: a title that states no
+      // capacity is not a small one.
+      if (av === null && bv === null) return 0
+      if (av === null) return 1
+      if (bv === null) return -1
+      return (av - bv) * flip
+    }
     case 'title':
       return a.listing.title.localeCompare(b.listing.title) * flip
     case 'seller':
@@ -372,6 +399,8 @@ export function buildReport(
       answers,
       gates,
       values,
+      ramGb: ramGbOf(listing),
+      storageGb: storageGbOf(listing),
       blend,
       passesGates,
       matching,

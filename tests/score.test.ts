@@ -460,3 +460,40 @@ describe('buildReport discard reasons and unjudged rows', () => {
     expect(report.matching[0]!.discardReason).toBeNull()
   })
 })
+
+describe('buildReport capacity columns', () => {
+  it('carries the capacity each title states, and null when it states none', () => {
+    const listings = [
+      listing({ id: 1, title: 'Lenovo ThinkPad T14s 32GB RAM 1TB SSD' }),
+      listing({ id: 2, title: 'Lenovo ThinkPad T14s Gen 6' }),
+    ]
+    const report = buildReport(listings, [...judged(1), ...judged(2)], settings())
+    const byId = new Map([...report.matching, ...report.discarded].map((r) => [r.listing.id, r]))
+
+    expect(byId.get(1)!.ramGb).toBe(32)
+    expect(byId.get(1)!.storageGb).toBe(1024)
+    expect(byId.get(2)!.ramGb).toBeNull()
+    expect(byId.get(2)!.storageGb).toBeNull()
+  })
+
+  it('sorts unknowns last whichever way the sort points', () => {
+    // Same rule the blend already follows: unknown is not a low value, so it does
+    // not become the top of an ascending sort either.
+    const listings = [
+      listing({ id: 1, title: 'Lenovo ThinkPad T14s 32GB RAM 1TB SSD' }),
+      listing({ id: 2, title: 'Lenovo ThinkPad T14s Gen 6' }),
+      listing({ id: 3, title: 'Lenovo ThinkPad T14s 64GB RAM 2TB SSD' }),
+    ]
+    const judgments = [...judged(1), ...judged(2), ...judged(3)]
+
+    for (const direction of ['asc', 'desc'] as const) {
+      const report = buildReport(
+        listings,
+        judgments,
+        settings({ sort: { column: 'ram', direction } }),
+      )
+      const ids = [...report.matching, ...report.discarded].map((r) => r.listing.id)
+      expect(ids[ids.length - 1]).toBe(2)
+    }
+  })
+})

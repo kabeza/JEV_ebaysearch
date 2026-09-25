@@ -1,3 +1,16 @@
+/** A run as the search list needs it: enough to date it, count it and open it. */
+export interface RunSummary {
+  id: number
+  searchId: number
+  status: RunStatus
+  startedAt: string | null
+  finishedAt: string | null
+  listings: number
+  rejected: number
+  /** Listings with at least one answer. Zero means there is nothing to report yet. */
+  judged: number
+}
+
 export interface Search {
   id: number
   name: string
@@ -5,6 +18,11 @@ export interface Search {
   criteriaText: string
   spec: Record<string, unknown>
   settings: Record<string, unknown>
+  /**
+   * This search's runs, newest first. The only door to a stored report: before
+   * this existed the page could not open a run it had not just started.
+   */
+  runs: RunSummary[]
 }
 
 async function request<T>(input: string, init?: RequestInit): Promise<T> {
@@ -65,10 +83,13 @@ export interface Listing {
   detail: ListingDetail | null
 }
 
+/** The six states a run can be in. `Run`, `RunSummary` and the badge share one name. */
+export type RunStatus = 'queued' | 'running' | 'paused' | 'cancelled' | 'failed' | 'complete'
+
 export interface Run {
   id: number
   searchId: number
-  status: 'queued' | 'running' | 'paused' | 'cancelled' | 'failed' | 'complete'
+  status: RunStatus
   startedAt: string | null
   finishedAt: string | null
   stats: Record<string, number | undefined>
@@ -161,4 +182,12 @@ export interface RunEvent {
   at: string
   type: string
   payload: Record<string, unknown>
+}
+
+/** Removes a search and everything under it. Irreversible; the UI asks twice. */
+export async function deleteSearch(id: number): Promise<void> {
+  const res = await fetch(`/api/searches/${id}`, { method: 'DELETE' })
+  if (res.status === 204) return
+  const body = (await res.json().catch(() => ({}))) as { error?: string }
+  throw new Error(body.error ?? `DELETE /api/searches/${id} failed: ${res.status}`)
 }

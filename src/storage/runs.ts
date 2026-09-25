@@ -136,3 +136,63 @@ export function sweepPausedRuns(db: SqliteDatabase): number {
 
   return orphans.length
 }
+
+/**
+ * One row per run, with what the search list needs to offer its report: how much
+ * the run found, how much the pre-filter stopped, and how many listings have an
+ * answer.
+ *
+ * `judged` counts distinct listings across every questionnaire version, not rows:
+ * a re-judged run has two versions answering the same listings, and counting rows
+ * would report twice the truth.
+ */
+export interface RunSummary {
+  id: number
+  searchId: number
+  status: RunStatus
+  startedAt: string | null
+  finishedAt: string | null
+  listings: number
+  rejected: number
+  judged: number
+}
+
+/**
+ * Every run, newest first. One query with correlated counts rather than a query
+ * per run: the search list refetches after every action, and this is the request
+ * it makes. The whole table is small enough that callers group in memory.
+ */
+export function listRunSummaries(db: SqliteDatabase): RunSummary[] {
+  const rows = db
+    .prepare(
+      `select r.id, r.search_id, r.status, r.started_at, r.finished_at,
+              (select count(*) from listings l where l.run_id = r.id) as listings,
+              (select count(*) from listings l where l.run_id = r.id and l.stage = 'rejected')
+                as rejected,
+              (select count(distinct j.listing_id) from judgments j where j.run_id = r.id)
+                as judged
+         from runs r
+        order by r.id desc`,
+    )
+    .all() as {
+    id: number
+    search_id: number
+    status: RunStatus
+    started_at: string | null
+    finished_at: string | null
+    listings: number
+    rejected: number
+    judged: number
+  }[]
+
+  return rows.map((row) => ({
+    id: row.id,
+    searchId: row.search_id,
+    status: row.status,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    listings: row.listings,
+    rejected: row.rejected,
+    judged: row.judged,
+  }))
+}

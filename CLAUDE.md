@@ -17,7 +17,7 @@ it sits near 0.5, edit the questions, and re-judge the same listings without scr
 ## Commands
 
 ```bash
-npm test                  # vitest, 372 tests
+npm test                  # vitest, 391 tests
 npm run typecheck         # tsc on BOTH the server and web projects
 npm run dev:server        # API on 127.0.0.1:3001 (needs .env)
 npm run dev:web           # Vite page on 127.0.0.1:5173
@@ -308,6 +308,45 @@ These were established by probing the live site. Do not replace them with assump
     gated-out rows with matching ones. The policy is right; on this data it changed no ordering.
     Design spec §3.3 of `2026-09-23-stage6-report-design.md` records the reversal and that caveat.
 
+29. **The search list is the hub, and it was built because the door was missing.** Until 2026-09-25
+    the page could not open a run it had not just started: `RunView` was reachable only from
+    `startRun`, the API's `GET /api/runs` had never had a caller in `web/`, and closing the run view
+    was a one-way door. A run paused on an eBay 403 and the reader never saw the Resume/Cancel buttons
+    that existed and worked — because the pause happened while the view was closed and there was no
+    way back. **A unit test could not see it: "there is no way to get there" is an absence, and no
+    assertion in the suite checks for one.** What now holds it together:
+
+    - `GET /api/searches` composes each search's own runs onto it (`listRunSummaries` in
+      `src/storage/runs.ts`, one query, newest first). Each row shows `#id · date · status ·
+      listings · juzgados`; the id and date are there because two runs of one search otherwise render
+      identically.
+    - **Exactly one way into every run**: `paused` shows Resume/Cancel, and every other status shows
+      the door (`Ver corrida` / `Ver reporte` / `Re-judge`). Gating the door on "finished" left a
+      `running` run unreachable and made Resume *remove* the controls the reader had just used.
+    - The list polls every 4s **while something is unsettled**, and refreshes after `Run search`. Without
+      it, a run that pauses while the view is closed leaves the row stale — the exact scenario this
+      exists for.
+    - `DELETE /api/searches/:id` → 204, 404 unknown, **409 while one of that search's runs is the active
+      job** (a run or a re-judge; they share the lock). The cascade is the schema's
+      (`foreign_keys = ON`). Irreversible, so the UI asks twice, names the numbers, and the confirm
+      wears `bg-danger` — a sixth palette colour added for it, because the spec asks the destructive
+      action not to look like Save/Run search/Resume.
+    - `RunStatusBadge` and the `RunStatus` type are shared by the run view and the row, so the two
+      cannot drift (the Stage 6 review and Stage 8's defect were both a rendering that lied about
+      status).
+
+30. **The report can sort by RAM and storage, and the pre-filter's parser is why the column is often
+    empty.** `web/src/lib/capacity.ts` reads the **title** through `parseRamGb`/`parseStorageGb` — the
+    same two functions the pre-filter uses, never item specifics (rule 15: their labels vary, and the
+    pre-filter does not read them either). Null renders `—` and sorts last in both directions. The
+    consequence a reader will notice: `readCapacities` resolves a bare capacity only via "exactly two
+    bare capacities, magnitude decides" or an adjacent label, so **a title with one capacity and no
+    label returns null** — `Lenovo ThinkPad T14s Gen 3 14" 32GB, Thunder Black` yields nothing, and
+    only 2 of run 8's 20 reported rows show a number against 62 of its 85 raw listings. The same hole
+    means the pre-filter does not reject a `16GB` title against a 32GB floor. Deliberate, not
+    overlooked: telling a lone `32GB` from a lone `512GB` is a guess, and a wrong reject is
+    unrecoverable. Changing it is the owner's call.
+
 ## Conventions
 
 - **TDD**: write the failing test, run it and watch it fail, implement minimally, watch it pass.
@@ -324,13 +363,21 @@ These were established by probing the live site. Do not replace them with assump
 
 ## Current state
 
-**Resume here (2026-09-25):** **Stages 0–8 are complete — the build plan has no next stage.** Stage 8
+**Resume here (2026-09-25):** **Stages 0–8 are complete, and the search list is now the hub** — every
+stored run is reachable, deletable and resumable from the page (rule 29), and the report sorts by RAM
+and storage (rule 30). Plan: `docs/superpowers/plans/2026-09-25-search-hub-plan.md`; design:
+`docs/superpowers/specs/2026-09-25-search-hub-design.md`.
+
+Stage 8
 was reviewed by a fresh-context reviewer on 2026-09-25: one Critical and four Important findings, all
 five closed with a test each (rules 25 and 26 hold three of them). The `spec: {}` gap closed the same
 day (rule 27): a re-judge now writes the buyer's half back onto the search, so a fresh run
 pre-filters on what the editor confirmed. What is left:
 
 - the **sponsored marker** (rule 5) — stored, not displayed, still no real discriminator;
+- **a title that states one capacity and no label** parses to nothing, so the RAM/storage columns are
+  mostly empty on real data *and* the pre-filter does not reject such a title against a floor
+  (rule 30). Deliberate restraint, measured, and the owner's call whether to change it;
 - **`spec: {}` on searches stored before 2026-09-25** — rule 27 fixes the write path, not the past:
   the five empty-spec searches stay empty until someone re-judges one of their runs (run 8's search 6
   is the only one that ever had a real spec);
@@ -368,7 +415,7 @@ A run judges as part of the run, so it needs `TYPESAFE_API_KEY`: the client is b
 first page load, so a missing key fails the run in the first second rather than after spending eBay
 page loads on listings it could never judge. A 28-survivor run costs roughly $0.0015.
 
-372 tests passing, typecheck clean on both projects. The last full end-to-end run was 2026-09-23
+391 tests passing, typecheck clean on both projects. The last full end-to-end run was 2026-09-23
 (run 8: 85 cards, 20 survivors judged, $0.00238).
 
 **The report's copy is pure functions now.** `web/src/lib/reportText.ts` owns what an empty table

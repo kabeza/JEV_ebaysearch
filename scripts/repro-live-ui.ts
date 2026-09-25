@@ -11,6 +11,10 @@
  */
 import { createServer } from 'node:http'
 import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { openDatabase } from '../src/storage/db'
+import { createSearch } from '../src/storage/searches'
+import { createRun, finishRun } from '../src/storage/runs'
+import { insertCards } from '../src/storage/listings'
 import { chromium } from 'playwright'
 import { buildServer } from '../src/server/index.js'
 import { extractCards } from '../src/scraper/cards.js'
@@ -226,6 +230,16 @@ async function main() {
   // A second run in the same page session: new runId, new EventSource.
   await page.click('button:has-text("Run search")')
   await page.waitForTimeout(500)
+
+  // The hub must show the run it just started. Without a refresh after `startRun`
+  // the row keeps the runs it had, so a run started here is invisible until the
+  // reader reloads — and a run that *pauses* while the run view is closed, the
+  // scenario the whole change exists for, is invisible for the same reason.
+  const rowsRightAfterStart = await page
+    .locator('li:has-text("listings")')
+    .count()
+  console.log(`\nrun rows on the search, without a reload: ${rowsRightAfterStart}`)
+
   await sampleRun('run2')
 
   console.log(`\n--- stage 8: a challenge on page 2 ---`)
@@ -536,6 +550,136 @@ async function main() {
     .innerText()
     .catch(() => '(no empty-state cell)')
   console.log(`empty table with every row gated out: ${JSON.stringify(emptyCell)}`)
+
+
+  // The defect this whole change exists for: the page could not open a run it had
+  // not just started, so a finished report was unreachable from the UI and a
+  // paused run's Resume button had no door to reach it through. No unit test could
+  // see it — "there is no way to get there" is an absence.
+  await page.reload()
+  await page.waitForSelector('text=Borrar búsqueda', { timeout: 10_000 })
+  const doorButtons = page.getByRole('button', { name: /Ver reporte|Re-judge/ })
+  const doorCount = await doorButtons.count()
+  console.log(`\nruns listed on the search row: ${doorCount > 0 ? 'yes' : 'no'} (${doorCount})`)
+
+  // The delete asks twice, and the first click states the damage before it commits.
+  await page.getByRole('button', { name: 'Borrar búsqueda' }).first().click()
+  const warning = await page
+    .locator('text=/Esto borra/')
+    .first()
+    .innerText()
+    .catch(() => '(no warning)')
+  console.log(`delete warning: ${JSON.stringify(warning.slice(0, 100))}`)
+  await page.getByRole('button', { name: 'No' }).first().click()
+  const stillThere = await page.getByRole('button', { name: 'Borrar búsqueda' }).count()
+  console.log(`search still present after declining: ${stillThere > 0}`)
+
+  // And the door opens a report that has rows in it.
+  if (doorCount > 0) await doorButtons.first().click()
+  await page.waitForSelector('table', { timeout: 10_000 })
+  const rowsAfterOpening = await page.locator('tbody tr').count()
+  console.log(`rows in the report opened from the list: ${rowsAfterOpening}`)
+
+
+  // The capacity columns, read the way a reader reads them: find the column by its
+  // header rather than by a hardcoded index, since the table's leading cell is the
+  // expand toggle and the columns shift when one is added.
+  const headers = await page.locator('thead th').allInnerTexts()
+  const ramIndex = headers.findIndex((h) => h.trim() === 'RAM') + 1
+  const storageIndex = headers.findIndex((h) => h.trim() === 'Storage') + 1
+  const ramCells = await page.locator(`tbody tr td:nth-child(${ramIndex})`).allInnerTexts()
+  const storageCells = await page.locator(`tbody tr td:nth-child(${storageIndex})`).allInnerTexts()
+  console.log(`\nRAM column at index ${ramIndex}, storage at ${storageIndex} of ${headers.length}`)
+  console.log(`first RAM cells: ${JSON.stringify(ramCells.slice(0, 5))}`)
+  console.log(`first storage cells: ${JSON.stringify(storageCells.slice(0, 5))}`)
+  // A column of nothing but dashes proves the render and nothing about the parse,
+  // so the counts are the evidence: this fixture's titles are mostly accessories.
+  const valued = (cells: string[]) => cells.filter((c) => c.trim() !== '—').length
+  console.log(`RAM cells with a number: ${valued(ramCells)} of ${ramCells.length}`)
+  console.log(`storage cells with a number: ${valued(storageCells)} of ${storageCells.length}`)
+
+  // The ordinary case: a search with no runs at all. Its row must still offer the
+  // delete — the first version of this component returned early with `Sin corridas
+  // todavía.` and left the delete control inside the runs branch, so a freshly
+  // saved search could not be removed from the UI at all.
+  await page.evaluate(async () => {
+    await fetch('/api/searches', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'sin corridas', keyword: 'ninguna', criteriaText: '' }),
+    })
+  })
+  await page.reload()
+  await page.waitForSelector('text=Borrar búsqueda', { timeout: 10_000 })
+  const deleteButtons = await page.getByRole('button', { name: 'Borrar búsqueda' }).count()
+  const emptyNotice = await page.getByText('Sin corridas todavía.').count()
+  console.log(
+    `searches with a delete button: ${deleteButtons} (one of them has no runs: ${emptyNotice > 0})`,
+  )
+
+  // Every run needs a way in. Gating the door on a finished status leaves a
+  // `running` run unreachable — and clicking Resume makes a paused run running,
+  // which removed the very controls the reader had just used.
+  // One door per run, whatever its state: `paused` gets its own two controls and
+  // everything else gets a way in. Counted by label, since the labels are what a
+  // run in each state actually shows.
+  const doors = await page.getByRole('button', { name: 'Ver reporte' }).count()
+  const rejudgeDoorsNow = await page.getByRole('button', { name: 'Re-judge' }).count()
+  const liveDoors = await page.getByRole('button', { name: 'Ver corrida' }).count()
+  const resumeCount = await page.getByRole('button', { name: 'Resume' }).count()
+  console.log(
+    `run rows: ${doors + rejudgeDoorsNow + liveDoors} · doors: ${doors} · re-judge: ${rejudgeDoorsNow}` +
+      ` · live: ${liveDoors} · resume: ${resumeCount}`,
+  )
+
+  // The row must say which run it is: two runs of one search otherwise render
+  // identically and choosing one is a coin flip.
+  const stamps = await page.getByText(/#\d+ · 20\d\d-\d\d-\d\d/).count()
+  const sample = await page.getByText(/#\d+ · 20\d\d-\d\d-\d\d/).first().innerText()
+  console.log(`run rows carrying an id and a date: ${stamps} | ${JSON.stringify(sample.slice(0, 60))}`)
+
+  // The irreversible confirm must not wear the same fill as Save / Run search /
+  // Resume. The spec asks for a treatment of its own.
+  await page.getByRole('button', { name: 'Borrar búsqueda' }).first().click()
+  const confirmClass = await page
+    .getByRole('button', { name: 'Sí, borrar' })
+    .first()
+    .getAttribute('class')
+  console.log(`destructive confirm wears almond: ${(confirmClass ?? '').includes('almond')}`)
+  await page.getByRole('button', { name: 'No' }).first().click()
+
+  // Review Focus 3: a run with no answers must offer the way to produce them,
+  // not a report that would be empty. Seeded directly, because a live unjudged run
+  // is not something the repro's two runs can be.
+  const seedDb = openDatabase(DB)
+  const seedSearch = createSearch(seedDb, { name: 'sin juzgar', keyword: 'k', criteriaText: '' })
+  const seedRun = createRun(seedDb, seedSearch.id, {})
+  insertCards(seedDb, seedRun.id, [
+    {
+      itemId: '999000111',
+      title: 'Lenovo ThinkPad T14s 32GB 1TB',
+      url: 'https://www.ebay.com/itm/999000111',
+      price: 1200,
+      shipping: 0,
+      currency: 'USD',
+      conditionLabel: 'Open Box',
+      sellerName: 'store',
+      sellerFeedback: '100% positive (10)',
+      watchers: null,
+      buyingFormat: 'Buy It Now',
+      sponsoredMarker: false,
+      rawText: [],
+    },
+  ])
+  // `createRun` inserts `running`; a finished run with no answers is the state
+  // Review Focus 3 is about.
+  finishRun(seedDb, seedRun.id, { status: 'cancelled' })
+  seedDb.close()
+  await page.reload()
+  await page.waitForSelector('text=Re-judge', { timeout: 10_000 })
+  const unjudged = await page.getByText('sin juzgar').count()
+  const rejudgeDoors = await page.getByRole('button', { name: 'Re-judge' }).count()
+  console.log(`runs reading "sin juzgar": ${unjudged} · Re-judge doors: ${rejudgeDoors}`)
 
   await browser.close()
   await scraperBrowser.close()

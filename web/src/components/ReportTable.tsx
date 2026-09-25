@@ -14,6 +14,8 @@ const COLUMNS: { key: SortColumn; label: string; className?: string }[] = [
   { key: 'title', label: 'Title' },
   { key: 'price', label: 'Price', className: 'pr-3' },
   { key: 'shipping', label: 'Ship', className: 'pr-3' },
+  { key: 'ram', label: 'RAM', className: 'pr-3' },
+  { key: 'storage', label: 'Storage', className: 'pr-3' },
   { key: 'seller', label: 'Seller' },
   { key: 'trust', label: 'Feedback' },
   { key: 'blend', label: 'Blend' },
@@ -141,6 +143,14 @@ export function ReportTable({
                 <td className="py-2 pr-3 whitespace-nowrap text-lilac-ash">
                   {money(row.listing.shipping)}
                 </td>
+                <td className="py-2 pr-3">{row.ramGb === null ? '—' : `${row.ramGb} GB`}</td>
+                <td className="py-2 pr-3">
+                  {row.storageGb === null
+                    ? '—'
+                    : row.storageGb % 1024 === 0
+                      ? `${row.storageGb / 1024} TB`
+                      : `${row.storageGb} GB`}
+                </td>
                 <td className="py-2 pr-3 whitespace-nowrap text-lilac-ash">
                   {row.listing.sellerName ?? '—'}
                 </td>
@@ -157,7 +167,7 @@ export function ReportTable({
               {openId === row.listing.id && (
                 <tr className="border-b border-lilac-ash/10">
                   <td />
-                  <td colSpan={7} className="py-3 pr-3">
+                  <td colSpan={9} className="py-3 pr-3">
                     <ListingDetailPanel
                       listing={row.listing}
                       answers={Object.entries(row.answers).map(([questionKey, answer]) => ({
@@ -191,7 +201,7 @@ export function ReportTable({
 
           {visible.length === 0 && (
             <tr>
-              <td colSpan={8} className="py-4 text-lilac-ash/70">
+              <td colSpan={10} className="py-4 text-lilac-ash/70">
                 {emptyReportMessage({
                   matchingCount: report.matchingCount,
                   pendingCount: report.pendingCount,

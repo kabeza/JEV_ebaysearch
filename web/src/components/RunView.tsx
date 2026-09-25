@@ -29,6 +29,7 @@ import {
 import { VersionSelector } from './VersionSelector'
 import { QuestionEditor } from './QuestionEditor'
 import { acceptedConditionsFrom, type SearchRequest } from '../../../src/jev/questions'
+import { RunStatusBadge } from './RunStatusBadge'
 import { WeightControls } from './WeightControls'
 import { ReportTable } from './ReportTable'
 
@@ -229,18 +230,7 @@ export default function RunView({ runId, search, onClose }: Props) {
       <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-lg text-almond-silk">
-            Run {runId}{' '}
-            {/* A paused run is stopped, waiting for a person: it must not wear
-                the same badge as one that is working. */}
-            <span
-              className={`ml-2 rounded px-2 py-0.5 text-sm ${
-                run?.status === 'paused'
-                  ? 'bg-almond-silk text-space-indigo'
-                  : 'bg-dusty-grape text-seashell'
-              }`}
-            >
-              {run?.status ?? 'loading'}
-            </span>
+            Run {runId} <RunStatusBadge status={run?.status ?? null} className="ml-2" />
           </h2>
           {run && (
             <p className="mt-1 text-sm text-lilac-ash">

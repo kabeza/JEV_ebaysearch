@@ -2,7 +2,14 @@ export const PROJECT_NAME = 'jevbrowser'
 
 /** Run settings, defaulted to the values agreed in the design spec (section 5.1). */
 export interface RunSettings {
-  /** Stop after this many result pages. */
+  /**
+   * Stop after this many result pages.
+   *
+   * 10 since 2026-09-25, reduced from 25 after a real run was 403'd on page 18. The
+   * pages-to-listings arithmetic is not 50 each: eBay returned 14–19 cards per page
+   * with `_ipg=60` requested (measured on run 9, 318 cards over 17 pages), so ten
+   * pages is ~150–190 cards — and past page 14 the same items were recurring.
+   */
   maxPages: number
   /** Stop after this many minutes, whichever comes first. */
   maxMinutes: number
@@ -35,7 +42,7 @@ export interface RunSettings {
 }
 
 export const DEFAULTS: RunSettings = {
-  maxPages: 25,
+  maxPages: 10,
   maxMinutes: 10,
   batchSize: 25,
   maxDetailVisits: 20,

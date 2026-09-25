@@ -41,6 +41,8 @@ function row(over: Partial<ReportRow> = {}): ReportRow {
       seller_feedback: 1,
       shipping: 1,
     },
+    ramGb: null,
+    storageGb: null,
     blend: 0.86,
     passesGates: true,
     matching: true,
