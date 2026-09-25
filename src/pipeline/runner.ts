@@ -117,8 +117,6 @@ export function startRun(db: SqliteDatabase, o: StartRunOptions): number {
     cancelled: false,
     kind: 'run',
     pause: createPause({
-      db,
-      runId: run.id,
       setStatus: (status) => updateRunStatus(db, run.id, status),
       emit: (type, payload) => emit(db, run.id, type, payload),
     }),
@@ -177,7 +175,14 @@ export function startRun(db: SqliteDatabase, o: StartRunOptions): number {
         isCancelled: () => active?.cancelled ?? true,
         // A challenge or an outage waits here instead of ending the run; the
         // wait ends with the Resume button or the Cancel one.
-        pause: (detail) => active?.pause.wait(detail) ?? Promise.resolve(),
+        //
+        // A cancel that already arrived must win. `cancelRun` releases whatever
+        // is waiting, so it is a no-op when nothing is waiting yet — installing
+        // a wait after that click would never be released, and the run would sit
+        // `paused` holding the one-job lock until someone clicked again.
+        // Resolving at once lets the pipeline's own post-pause `isCancelled()`
+        // check end the run as `cancelled`, which is what was asked for.
+        pause: (detail) => (active && !active.cancelled ? active.pause.wait(detail) : Promise.resolve()),
         // Without this the run writes events to SQLite but live viewers see
         // nothing until they reconnect. The pipeline must publish as it goes.
         publish: (event) => bus.emit(`run:${run.id}`, event),
@@ -246,8 +251,6 @@ export function startRejudge(db: SqliteDatabase, o: StartRejudgeOptions): { vers
     cancelled: false,
     kind: 'rejudge',
     pause: createPause({
-      db,
-      runId: o.runId,
       setStatus: (status) => updateRunStatus(db, o.runId, status),
       emit: (type, payload) => emit(db, o.runId, type, payload),
     }),

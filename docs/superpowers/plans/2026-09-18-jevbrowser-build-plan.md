@@ -1696,6 +1696,40 @@ with `srp-results.html` as the deliberate markup-change detector (60 cards again
 **Out of scope, deliberately:** surviving a *process restart* while paused (the wait lives in the
 process; the data does not), an automatic retry after a delay, and a pause on a 401.
 
+### The fresh-context review, and what it cost to pass (2026-09-25)
+
+The review this stage was owed was dispatched on 2026-09-25 against `1592c9e..7055548`. It returned
+one Critical and four Important findings, all five now closed with a test each; the suite went 353 →
+358, typecheck clean on both projects.
+
+**The Critical was real and the reviewer proved it before reporting it.** The page loop checks
+`isCancelled()` at its top, and a Cancel click landing between that check and the challenge arriving
+meant `o.pause(...)` installed a wait that `cancelRun`'s `release()` had already been and gone
+without releasing — the run stayed `paused` holding the one-job lock until someone clicked again. One
+line in `runner.ts`'s wiring fixes both pause sites, and `tests/runner-live.test.ts` now pins both
+orderings of cancel and pause through the real runner (`expected 'paused' to be 'cancelled'` was the
+RED).
+
+**Three more, each a test rather than an argument.** A one-minute run paused ninety seconds for a
+captcha came back to find its own cap expired — it stopped paging and skipped its detail visits, so a
+person's patience cost them the run they were waiting for; the deadline is now discounted by the time
+a pause cost, and a run waiting for a service is not charged to the budget either. `srp-broken.html`
+was consumed only by `cardCount`, a regex over the HTML, so "the real `extractCards` refuses a page
+whose markup moved" was nowhere: `tests/scraper-cards.test.ts` now drives the real parser against the
+fixture. And a run left `paused` by a stopped process offered a Resume button that could only 409
+while the question editor stayed shut — `sweepPausedRuns` ends such a run at server start. All three
+are CLAUDE.md rules 25 and 26.
+
+**A plan correction, the only one this stage produced.** Task 4's snippet asserted
+`expect(outcome.status).toBe('complete')` on the empty-cards case, under a test *named* "fails loudly
+… never completing with none". The implementation asserts `failed`, which is what the name, Review
+Focus 6 and rule 7 all say; the plan's line was wrong, and it was not ledgered at the time.
+
+**One finding pushed back on.** Minor #5 claimed the crash test's comment promised a throw on the
+first page while `goto` throws on the second. There is no such comment, and the test's name and
+assertions are the ones it means — page 1's card is stored, and that is what "leaves everything
+already stored readable" checks. Not changed.
+
 ---
 
 ## Stage 3 — code pre-filter (complete 2026-09-21)
@@ -1989,10 +2023,13 @@ finally has room above it — which was the question this whole thread started f
 
 **Unfinished — pick up here next session:**
 
-1. **Every stage is complete** — see the section for each above, Stage 8 last. There is no next
-   stage in this plan. What remains is the standing list below: the sponsored marker, `spec: {}` on
-   every stored search, and the two hardening items §8 of Stage 8's design puts out of scope (a
-   pause that survives a process restart; anything at all for a `401`).
+1. **Every stage is complete, and every stage's review is closed** — see the section for each above,
+   Stage 8 last. There is no next stage in this plan. Stage 8's owed fresh-context review ran on
+   2026-09-25 (1 Critical, 5 Important, 7 Minor; all five closed with a test each — see "The
+   fresh-context review" in Stage 8). What remains is the standing list below: the sponsored marker,
+   `spec: {}` on every stored search, and a pause that survives a process restart — of which only the
+   unusable-row half has been addressed (`sweepPausedRuns` ends the orphan at server start; nothing
+   continues what it was doing). A `401` still only fails loudly.
 
 2. **The sponsored marker is still a known defect.** `.s-card__sep b` is present on every card, so
    it carries no signal — a live run flagged 113 of 113. The field is retained as a raw observation

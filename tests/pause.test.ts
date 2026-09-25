@@ -18,8 +18,6 @@ function fixture() {
   const emit = (type: Parameters<typeof appendEvent>[2], payload: unknown) =>
     appendEvent(db, run.id, type, payload)
   const pause = createPause({
-    db,
-    runId: run.id,
     setStatus: (status) => updateRunStatus(db, run.id, status),
     emit,
   })

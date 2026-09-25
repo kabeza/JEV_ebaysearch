@@ -1,4 +1,3 @@
-import type { Database as SqliteDatabase } from 'better-sqlite3'
 import type { RunStatus } from '../storage/runs'
 import type { RunEventType } from '../storage/events'
 
@@ -40,8 +39,6 @@ export interface Pause {
 }
 
 export interface PauseOptions {
-  db: SqliteDatabase
-  runId: number
   /** How the run's status is written; the runner supplies `updateRunStatus`. */
   setStatus: (status: RunStatus) => void
   emit: (type: RunEventType, payload: unknown) => void

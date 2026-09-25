@@ -17,7 +17,7 @@ it sits near 0.5, edit the questions, and re-judge the same listings without scr
 ## Commands
 
 ```bash
-npm test                  # vitest, 353 tests
+npm test                  # vitest, 358 tests
 npm run typecheck         # tsc on BOTH the server and web projects
 npm run dev:server        # API on 127.0.0.1:3001 (needs .env)
 npm run dev:web           # Vite page on 127.0.0.1:5173
@@ -240,6 +240,24 @@ These were established by probing the live site. Do not replace them with assump
     finishes with what it found; a 404 on page 1 still fails, because that is a search URL that is
     wrong.
 
+25. **A pause is not charged to the run's `maxMinutes`, and a cancel that arrives first still
+    wins.** Two things the Stage 8 review found, both fixed with a test through the real runner:
+    the deadline is now discounted by the wall-clock a pause cost (`waitedMs` in `run.ts`, fed by a
+    single `waitForPerson` wrapper both pause sites go through), because the cap exists for time and
+    politeness (rule 10) and a captcha someone takes three minutes over was spending a third of a
+    ten-minute run. And the runner's `pause` wiring checks `active.cancelled` *before* installing a
+    wait: `cancelRun` releases whatever is waiting, so a cancel that lands just before a challenge
+    used to install a wait nothing would ever release — the run sat `paused` holding the one-job
+    lock until a second click. Both orderings are pinned in `tests/runner-live.test.ts`.
+
+26. **A pause cannot outlive its process, so a server start ends any run still `paused`.**
+    `sweepPausedRuns` (`src/storage/runs.ts`, called from `buildServer`) marks them `cancelled`,
+    writes `finished_at` with a reason, and records a `run.cancelled` event. Nothing was left to
+    resume them — the wait was a promise in the dead process — and while such a row stayed `paused`
+    the page offered a Resume button that could only 409 and the question editor stayed shut,
+    because the editor opens on a run with a final status. Rule 13 makes this easy to hit by
+    accident.
+
 ## Conventions
 
 - **TDD**: write the failing test, run it and watch it fail, implement minimally, watch it pass.
@@ -256,10 +274,13 @@ These were established by probing the live site. Do not replace them with assump
 
 ## Current state
 
-**Resume here (2026-09-24):** **Stages 0–8 are complete — the build plan has no next stage.** What is
-left is the standing list: the sponsored marker (rule 5), `spec: {}` on every stored search (the
-question editor writes the draft's request but not back to `searches`), and the two things Stage 8
-deliberately left out (a pause that survives a process restart; any handling of a `401` beyond failing
+**Resume here (2026-09-25):** **Stages 0–8 are complete — the build plan has no next stage.** Stage 8
+was reviewed by a fresh-context reviewer on 2026-09-25: one Critical and four Important findings, all
+five closed with a test each (rules 25 and 26 hold three of them). What is left is the standing list:
+the sponsored marker (rule 5), `spec: {}` on every stored search (the question editor writes the
+draft's request but not back to `searches`), and the one thing Stage 8 genuinely still leaves out —
+resuming a pause that a process restart ended (the row is now swept to `cancelled` instead of being
+left unusable, but there is still no attempt to continue what it was doing; a `401` still only fails
 loudly).
 
 **A run pauses instead of dying since 2026-09-24.** A bot challenge or an exhausted JEV outage waits
@@ -284,7 +305,7 @@ A run judges as part of the run, so it needs `TYPESAFE_API_KEY`: the client is b
 first page load, so a missing key fails the run in the first second rather than after spending eBay
 page loads on listings it could never judge. A 28-survivor run costs roughly $0.0015.
 
-353 tests passing, typecheck clean on both projects. The last full end-to-end run was 2026-09-23
+358 tests passing, typecheck clean on both projects. The last full end-to-end run was 2026-09-23
 (run 8: 85 cards, 20 survivors judged, $0.00238).
 
 **The report's copy is pure functions now.** `web/src/lib/reportText.ts` owns what an empty table

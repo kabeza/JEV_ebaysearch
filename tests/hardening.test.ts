@@ -126,8 +126,6 @@ describe('a bot challenge', () => {
     // The real signal, as the runner builds it: the pause must write its event
     // and its status, not only hold the pipeline.
     const signal = createPause({
-      db,
-      runId,
       setStatus: (status) => updateRunStatus(db, runId, status),
       emit: (type, payload) => appendEvent(db, runId, type, payload),
     })
@@ -378,8 +376,6 @@ describe('a JEV outage', () => {
     const { source } = plainSource()
     const client = overloadedClient(2)
     const signal = createPause({
-      db,
-      runId,
       setStatus: (status) => updateRunStatus(db, runId, status),
       emit: (type, payload) => appendEvent(db, runId, type, payload),
     })
@@ -463,6 +459,45 @@ describe('the pace a run was configured with', () => {
     // Two page loads and two detail visits at ~30ms is well under 500ms; at the
     // defaults the same run takes six seconds or more.
     expect(elapsed).toBeLessThan(2000)
+  })
+})
+
+describe("the run's time budget", () => {
+  it('does not spend the cap on the time a person spends waiting', async () => {
+    // A challenge pauses the run for as long as the person needs. The cap exists
+    // for time and politeness (rule 10), and the pause has no deadline of its own
+    // (spec decision 2) — so waiting must not quietly spend the run's budget. A
+    // three-minute captcha on a ten-minute run was a third of it: the run resumed,
+    // fetched the page it was waiting on, and then stopped paging and skipped its
+    // detail visits because the cap had "expired" while nobody was scraping.
+    const { db, runId } = setup()
+    const { source } = challengingSource()
+    let clock = 0
+
+    const outcome = await executeRun({
+      db,
+      runId,
+      keyword: 'thinkpad',
+      settings: { ...settings, maxPages: 3, maxMinutes: 1, maxDetailVisits: 0 },
+      source,
+      publish: () => {},
+      screenshotsDir: 'data/screenshots',
+      now: () => clock,
+      sleep: async () => {},
+      pause: async () => {
+        // The person takes ninety seconds over the captcha: more than this
+        // run's entire one-minute budget.
+        clock += 90_000
+      },
+    })
+
+    const notes = listEvents(db, runId)
+      .filter((e) => e.type === 'run.progress')
+      .map((e) => (e.payload as { note?: string }).note)
+
+    expect(notes).not.toContain('time cap reached')
+    expect(outcome.status).toBe('complete')
+    expect(outcome.pagesFetched).toBe(3)
   })
 })
 

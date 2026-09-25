@@ -1,4 +1,5 @@
 import type { Database as SqliteDatabase } from 'better-sqlite3'
+import { appendEvent } from './events'
 
 export type RunStatus = 'queued' | 'running' | 'paused' | 'cancelled' | 'failed' | 'complete'
 
@@ -91,14 +92,47 @@ export function finishRun(db: SqliteDatabase, id: number, o: FinishRunOptions): 
   ).run(o.status, JSON.stringify(mergedStats), o.error ?? null, id)
 }
 
-/** Records progress mid-run, so a re-attached page can show where the run is. */
 /** Moves a run to another status without finishing it: `paused`, and back. */
 export function updateRunStatus(db: SqliteDatabase, id: number, status: RunStatus): void {
   db.prepare('update runs set status = ? where id = ?').run(status, id)
 }
 
+/** Records progress mid-run, so a re-attached page can show where the run is. */
 export function updateRunStats(db: SqliteDatabase, id: number, stats: RunStats): void {
   const existing = getRun(db, id)
   const merged = { ...(existing?.stats ?? {}), ...stats }
   db.prepare('update runs set stats_json = ? where id = ?').run(JSON.stringify(merged), id)
+}
+
+/**
+ * Ends every run still marked `paused` — what a server start does before it
+ * accepts anything.
+ *
+ * A pause lives in the process that took it: the wait is a promise and the
+ * browser it holds is in memory. A run left `paused` by a stopped process has
+ * nobody left to resume it, and while it stays that way the page offers a Resume
+ * button that can only 409 and the question editor stays shut, because the
+ * editor opens on a run with a final status — so the row can never be re-judged.
+ * Restarting after a change under `src/` is routine (rule 13), so this is easy
+ * to hit by accident.
+ *
+ * Such a run did not finish and did not fail: it was stopped, and its partial
+ * results are kept. Returns how many rows it ended, so the caller can say so.
+ */
+export function sweepPausedRuns(db: SqliteDatabase): number {
+  const orphans = db.prepare("select id from runs where status = 'paused'").all() as {
+    id: number
+  }[]
+
+  for (const { id } of orphans) {
+    finishRun(db, id, {
+      status: 'cancelled',
+      error:
+        'The server restarted while this run was paused. A pause lives in the running ' +
+        'process, so there was nothing left to resume. The listings already found are kept.',
+    })
+    appendEvent(db, id, 'run.cancelled', { status: 'cancelled', reason: 'server_restarted' })
+  }
+
+  return orphans.length
 }

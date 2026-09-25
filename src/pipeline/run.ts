@@ -154,6 +154,31 @@ export async function executeRun(o: ExecuteRunOptions): Promise<RunOutcome> {
   const screenshotsDir = o.screenshotsDir ?? 'data/screenshots'
 
   const deadline = now() + o.settings.maxMinutes * 60_000
+  /**
+   * Wall-clock spent waiting for a person, which the run's budget must not pay
+   * for. The cap exists for time and politeness — roughly 50 page loads in a day
+   * earns a 403 (rule 10) — and a pause has no deadline of its own (spec decision
+   * 2). Charging it here meant a captcha someone took three minutes over spent a
+   * third of a ten-minute run: it resumed, then stopped paging and skipped its
+   * detail visits because the cap had expired while nobody was scraping.
+   */
+  let waitedMs = 0
+
+  /**
+   * Waits for a person and records how long that took, so the deadline check can
+   * discount it. Every pause goes through here — the page loop's and the judge
+   * phase's — because they share the same budget.
+   */
+  const waitForPerson = async (detail: PauseDetail): Promise<void> => {
+    const pause = o.pause
+    if (!pause) return
+    const at = now()
+    await pause(detail)
+    waitedMs += now() - at
+  }
+
+  const outOfTime = () => now() >= deadline + waitedMs
+
   let pagesFetched = 0
   let cardsSeen = 0
   let listingsStored = 0
@@ -224,7 +249,7 @@ export async function executeRun(o: ExecuteRunOptions): Promise<RunOutcome> {
 
     for (const listing of survivors) {
       if (o.isCancelled?.()) return null
-      if (now() >= deadline) {
+      if (outOfTime()) {
         emit('run.progress', { note: 'time cap reached during listing visits', detailsFetched })
         return null
       }
@@ -270,7 +295,7 @@ export async function executeRun(o: ExecuteRunOptions): Promise<RunOutcome> {
     pages: for (let page = 1; page <= o.settings.maxPages; page++) {
       if (o.isCancelled?.()) return stopWith('cancelled')
 
-      if (now() >= deadline) {
+      if (outOfTime()) {
         emit('run.progress', { note: 'time cap reached', pagesFetched })
         break
       }
@@ -315,7 +340,7 @@ export async function executeRun(o: ExecuteRunOptions): Promise<RunOutcome> {
         // would hang every run that reaches its page cap.
         const challenge = res.status === 403 || res.status === 503 || looksLikeChallenge(title)
         if (challenge && o.pause) {
-          await o.pause({
+          await waitForPerson({
             reason: 'bot_challenge',
             page,
             status: res.status,
@@ -387,7 +412,9 @@ export async function executeRun(o: ExecuteRunOptions): Promise<RunOutcome> {
         batchSize: o.judge.batchSize,
         emit,
         isCancelled: o.isCancelled,
-        pause: o.pause,
+        // The same wrapper, so a batch that waits for the service is not charged
+        // to the run either.
+        pause: o.pause ? waitForPerson : undefined,
       })
       judged = verdicts.judged
       jevInputTokens = verdicts.inputTokens

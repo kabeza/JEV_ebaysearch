@@ -3,7 +3,7 @@ import { openDatabase } from '../src/storage/db'
 import { createSearch } from '../src/storage/searches'
 import { listEvents } from '../src/storage/events'
 import { getRun } from '../src/storage/runs'
-import { startRun, subscribe, isRunning } from '../src/pipeline/runner'
+import { startRun, subscribe, isRunning, isPaused, cancelRun } from '../src/pipeline/runner'
 import type { PageSource } from '../src/scraper/browser'
 import type { JevAnswer, JevClient, JevRequest, JevResult } from '../src/jev/client'
 import type { RawCard } from '../src/scraper/cards'
@@ -156,5 +156,125 @@ describe('startRun live path', () => {
 
     expect(() => startRun(db, { searchId: search.id })).toThrowError(/already in progress/)
     await waitForIdle()
+  })
+
+  it('ends a run cancelled just before the challenge asked it to wait', { timeout: 15000 }, async () => {
+    // The window this pins: the Cancel click lands after the page loop's own
+    // `isCancelled()` check and before the challenge arm calls `pause`. The
+    // release `cancelRun` sends arrives when nothing is waiting yet, so if the
+    // wait is installed anyway nothing will ever release it — the run stays
+    // `paused` and holds the one-job lock. The cancel has to win, because that
+    // is what the person asked for.
+    const db = openDatabase(':memory:')
+    const search = createSearch(db, { name: 't', keyword: 'thinkpad', criteriaText: '' })
+    let runId = 0
+    let cancelledOnPage2 = false
+
+    const challenging: PageSource = {
+      async goto(url) {
+        if (url.includes('_pgn=2')) {
+          cancelledOnPage2 = true
+          // Exactly the race: cancelled by the click, not by the pipeline.
+          cancelRun(runId)
+          return { status: 503 }
+        }
+        return { status: 200 }
+      },
+      async title() {
+        return 'Pardon Our Interruption'
+      },
+      async readCards() {
+        return [card('111111111')]
+      },
+      async readListing() {
+        return {
+          title: 'Lenovo ThinkPad T14s Gen 6',
+          price: 1200,
+          shipping: 0,
+          condition: 'Open Box',
+          sellerName: 'store',
+          sellerFeedback: '99% positive',
+          specifics: {},
+          rawText: [],
+        }
+      },
+      async screenshot() {},
+      async close() {},
+    }
+
+    runId = startRun(db, {
+      searchId: search.id,
+      settings: { maxPages: 3, pacingMinMs: 1, pacingMaxMs: 2, maxDetailVisits: 0 },
+      sourceFactory: async () => challenging,
+      judgeClientFactory: fakeJevClient,
+    })
+
+    // Short: a cancelled run ends in milliseconds. Waiting longer only hides
+    // the bug behind the clock.
+    await waitForIdle(3000)
+    expect(cancelledOnPage2).toBe(true)
+    expect(getRun(db, runId)?.status).toBe('cancelled')
+    expect(isRunning()).toBe(false)
+  })
+
+  it('wakes a run that is already waiting when it is cancelled', async () => {
+    // The other ordering: the run is genuinely paused, then the Cancel click
+    // arrives. This is the direction `cancelRun`'s release call exists for — the
+    // wait resolves on a cancel as well as a resume, or a cancelled run would
+    // hold the one-job lock forever (spec decision 4).
+    const db = openDatabase(':memory:')
+    const search = createSearch(db, { name: 't', keyword: 'thinkpad', criteriaText: '' })
+
+    const challenging: PageSource = {
+      async goto(url) {
+        return url.includes('_pgn=2') ? { status: 503 } : { status: 200 }
+      },
+      async title() {
+        return 'Pardon Our Interruption'
+      },
+      async readCards() {
+        return [card('111111111')]
+      },
+      async readListing() {
+        return {
+          title: 'Lenovo ThinkPad T14s Gen 6',
+          price: 1200,
+          shipping: 0,
+          condition: 'Open Box',
+          sellerName: 'store',
+          sellerFeedback: '99% positive',
+          specifics: {},
+          rawText: [],
+        }
+      },
+      async screenshot() {},
+      async close() {},
+    }
+
+    const runId = startRun(db, {
+      searchId: search.id,
+      settings: { maxPages: 3, pacingMinMs: 1, pacingMaxMs: 2, maxDetailVisits: 0 },
+      sourceFactory: async () => challenging,
+      judgeClientFactory: fakeJevClient,
+    })
+
+    // Wait for the run to actually be waiting before cancelling it.
+    const started = Date.now()
+    while (!isPaused() && Date.now() - started < 3000) {
+      await new Promise((r) => setTimeout(r, 20))
+    }
+    expect(isPaused()).toBe(true)
+    expect(getRun(db, runId)?.status).toBe('paused')
+
+    // A paused run keeps the one-job lock: its visible browser holds the
+    // persistent profile, so a second run would be two Chromium profiles on one
+    // directory (spec decision 3).
+    expect(() => startRun(db, { searchId: search.id })).toThrowError(/already in progress/)
+
+    expect(cancelRun(runId)).toBe(true)
+    await waitForIdle(3000)
+    expect(getRun(db, runId)?.status).toBe('cancelled')
+    expect(isPaused()).toBe(false)
+    expect(isRunning()).toBe(false)
   })
 })

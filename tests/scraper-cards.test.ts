@@ -14,6 +14,9 @@ import {
 } from '../src/scraper/cards'
 
 const FIXTURE = join(import.meta.dirname, 'fixtures/ebay/srp-results.html')
+// The same real capture with the card class renamed: the page a run must refuse
+// rather than report as "no results" (spec §13).
+const BROKEN_FIXTURE = join(import.meta.dirname, 'fixtures/ebay/srp-broken.html')
 
 describe('parsePrice', () => {
   it('parses a plain price', () => {
@@ -251,5 +254,31 @@ describe('extractCards against the captured results page', () => {
     }
     // Free shipping is a real, common answer on this page.
     expect(cards.some((c) => c.shipping === 0)).toBe(true)
+  })
+})
+
+describe('extractCards against the page whose markup moved', () => {
+  // The fixture pair is the stage's deliberate detector for "eBay changed its
+  // markup". `cardCount` counts the class in the raw HTML; this drives the real
+  // parser against the same file, so the pair is a regression test rather than a
+  // substring counter — and it is what proves the error the pipeline turns into
+  // `extraction_failed` is the error the real scraper actually raises.
+  let browser: Browser
+  let page: Page
+
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true })
+    page = await browser.newPage()
+    await page.setContent(readFileSync(BROKEN_FIXTURE, 'utf8'), {
+      waitUntil: 'domcontentloaded',
+    })
+  })
+
+  afterAll(async () => {
+    await browser.close()
+  })
+
+  it('refuses the page instead of reporting it as no results', async () => {
+    await expect(extractCards(page)).rejects.toThrow(/No \.s-card elements found/)
   })
 })

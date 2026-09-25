@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { openDatabase } from '../storage/db'
+import { sweepPausedRuns } from '../storage/runs'
 import type { PageSource } from '../scraper/browser'
 import type { JevClient } from '../jev/client'
 import { registerSearchRoutes } from './routes/searches'
@@ -26,6 +27,14 @@ export function buildServer(opts: ServerOptions = {}): FastifyInstance {
 
   const app = Fastify({ logger: opts.logger ?? false })
   const db = openDatabase(dbPath)
+
+  // Nothing is running yet, so any run still marked `paused` belongs to a process
+  // that has ended — and a pause cannot outlive its process. Without this the row
+  // keeps a Resume button that can only 409 and stays shut to the editor.
+  const orphans = sweepPausedRuns(db)
+  if (orphans > 0) {
+    app.log.warn(`Ended ${orphans} run(s) left paused by a previous process.`)
+  }
 
   registerSearchRoutes(app, db)
   registerRunRoutes(app, db, {
